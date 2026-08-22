@@ -161,11 +161,11 @@ Panel {
   readonly property var shownClosed: sectionRows(closed, "recently closed")
 
   // One flat cursor over every visible row, in display order.
-  readonly property int prBase: 0
-  readonly property int reviewBase: shownPrs.length
+  readonly property int notificationBase: 0
+  readonly property int prBase: shownNotifications.length
+  readonly property int reviewBase: prBase + shownPrs.length
   readonly property int issueBase: reviewBase + shownReviews.length
-  readonly property int notificationBase: issueBase + shownIssues.length
-  readonly property int mentionBase: notificationBase + shownNotifications.length
+  readonly property int mentionBase: issueBase + shownIssues.length
   readonly property int closedBase: mentionBase + shownMentions.length
   readonly property int rowCount: closedBase + shownClosed.length
 
@@ -185,10 +185,10 @@ Panel {
 
   function rowAt(i) {
     if (i < 0) return null
-    if (i < reviewBase) return { item: shownPrs[i], mention: false }
+    if (i < prBase) return { item: shownNotifications[i], mention: false, notification: true }
+    if (i < reviewBase) return { item: shownPrs[i - prBase], mention: false }
     if (i < issueBase) return { item: shownReviews[i - reviewBase], mention: false }
-    if (i < notificationBase) return { item: shownIssues[i - issueBase], mention: false }
-    if (i < mentionBase) return { item: shownNotifications[i - notificationBase], mention: false, notification: true }
+    if (i < mentionBase) return { item: shownIssues[i - issueBase], mention: false }
     if (i < closedBase) return { item: shownMentions[i - mentionBase], mention: true }
     if (i < rowCount) return { item: shownClosed[i - closedBase], mention: false }
     return null
@@ -204,10 +204,10 @@ Panel {
 
   function sectionStarts() {
     var starts = []
+    if (shownNotifications.length > 0) starts.push(notificationBase)
     if (shownPrs.length > 0) starts.push(prBase)
     if (shownReviews.length > 0) starts.push(reviewBase)
     if (shownIssues.length > 0) starts.push(issueBase)
-    if (shownNotifications.length > 0) starts.push(notificationBase)
     if (shownMentions.length > 0) starts.push(mentionBase)
     if (shownClosed.length > 0) starts.push(closedBase)
     return starts
@@ -687,6 +687,43 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          // ---------- Notifications ----------
+          PanelSeparator {
+            visible: notificationSection.visible
+            foreground: root.foreground
+          }
+
+          Column {
+            id: notificationSection
+            visible: root.shownNotifications.length > 0
+            width: parent.width
+            spacing: Style.space(4)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: "NOTIFICATIONS · " + root.shownNotifications.length
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.shownNotifications
+
+              ItemRow {
+                required property var modelData
+                required property int index
+                width: notificationSection.width
+                flatIndex: root.notificationBase + index
+                notification: true
+                item: modelData
+                glyph: ""
+                glyphColor: root.urgent
+                detail: modelData.repo + " · " + root.reasonLabel(modelData.reason)
+                  + " · " + root.timeAgo(modelData.updatedAt)
+              }
+            }
+          }
+
           // ---------- Pull requests ----------
           PanelSeparator {
             visible: prSection.visible
@@ -791,43 +828,6 @@ Panel {
                 item: modelData
                 glyph: ""
                 detail: modelData.repo + "#" + modelData.number + " · " + root.timeAgo(modelData.updatedAt)
-              }
-            }
-          }
-
-          // ---------- Notifications ----------
-          PanelSeparator {
-            visible: notificationSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: notificationSection
-            visible: root.shownNotifications.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "NOTIFICATIONS · " + root.shownNotifications.length
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.shownNotifications
-
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: notificationSection.width
-                flatIndex: root.notificationBase + index
-                notification: true
-                item: modelData
-                glyph: ""
-                glyphColor: root.urgent
-                detail: modelData.repo + " · " + root.reasonLabel(modelData.reason)
-                  + " · " + root.timeAgo(modelData.updatedAt)
               }
             }
           }
