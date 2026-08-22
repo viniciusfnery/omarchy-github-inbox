@@ -2,7 +2,7 @@
     "schemaVersion": 1,
     "id": "viniciusfnery.github-inbox",
     "name": "GitHub Inbox",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "author": "Vinicius Nery",
     "license": "MIT",
     "description": "Your GitHub inbox in the bar: open PRs, review requests, assigned issues, mentions with read-state, notifications, and recent closures.",
