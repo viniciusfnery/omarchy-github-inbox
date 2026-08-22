@@ -608,6 +608,7 @@ Panel {
               anchors.leftMargin: Style.space(12)
               anchors.rightMargin: Style.space(12)
               text: String(root.feed.error || "")
+              textFormat: Text.PlainText
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -990,6 +991,9 @@ Panel {
 
         Text {
           text: row.item ? String(row.item.title || "") : ""
+          // GitHub-controlled string: PlainText keeps AutoText from parsing
+          // markup-shaped titles (rich text would even fetch <img> URLs).
+          textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -999,6 +1003,7 @@ Panel {
 
         Text {
           text: row.detail
+          textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
