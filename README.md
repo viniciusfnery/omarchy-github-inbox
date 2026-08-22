@@ -97,6 +97,24 @@ settings UI under the bar widget's options.
 | `closedDays` | `30` | How far back "recently closed" looks |
 | `closedLimit` | `5` | Closed rows shown per org tab |
 
+## Uninstall
+
+```bash
+omarchy plugin remove viniciusfnery.github-inbox
+```
+
+That unloads the widget from the bar and deletes the plugin. It runs no
+background services, so nothing else keeps running. For a full scrub, two
+small data files remain to delete, and your keybinding if you added one:
+
+```bash
+rm -f ~/.cache/omarchy-github-tasks.json \
+      ~/.local/state/omarchy/github-mentions-seen.json
+```
+
+The plugin never touches your GitHub credentials — those belong to the
+`gh` CLI (`gh auth logout` if you want them gone too).
+
 ## Development
 
 `fetch.sh` (the data collector) is covered by a token-free test suite that
