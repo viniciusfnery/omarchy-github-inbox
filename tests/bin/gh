@@ -1,0 +1,45 @@
+#!/bin/bash
+# Fake GitHub CLI for the test suite. Serves fixtures from $FAKE_GH_FIXTURES,
+# appends every invocation to $FAKE_GH_LOG, and simulates failure modes:
+#   FAKE_GH_AUTH_FAIL=1  -> `gh auth status` fails (signed out)
+#   FAKE_GH_API_FAIL=1   -> API calls print an error body to stdout and exit 1,
+#                           exactly like the real gh does on HTTP errors
+[[ -n ${FAKE_GH_LOG:-} ]] && printf '%s\n' "$*" >>"$FAKE_GH_LOG"
+
+if [[ ${1:-} == auth ]]; then
+  exit "${FAKE_GH_AUTH_FAIL:-0}"
+fi
+[[ ${1:-} == api ]] || exit 1
+shift
+
+# --mark-read side entrance: gh api --method PATCH notifications/threads/<id>
+if [[ ${1:-} == --method ]]; then
+  exit 0
+fi
+
+url="${1:-}"
+
+if [[ $url == user ]]; then
+  echo "testuser"
+  exit 0
+fi
+
+if [[ ${FAKE_GH_API_FAIL:-0} == 1 ]]; then
+  echo '{"message":"API rate limit exceeded","documentation_url":"https://docs.github.com"}'
+  exit 1
+fi
+
+fix="${FAKE_GH_FIXTURES:?FAKE_GH_FIXTURES not set}"
+# Search fixtures hold the post-`--jq .items` array shape.
+case "$url" in
+search/issues*q=is:open+is:pr+author*) cat "$fix/authored.json" ;;
+search/issues*q=is:open+is:pr+assignee*) cat "$fix/assigned.json" ;;
+search/issues*review-requested*) cat "$fix/reviews.json" ;;
+search/issues*q=is:open+is:issue+assignee*) cat "$fix/issues.json" ;;
+search/issues*q=is:open+mentions*) cat "$fix/mentions.json" ;;
+search/issues*q=is:closed+is:pr+author*) cat "$fix/closed-prs.json" ;;
+search/issues*q=is:closed+is:issue+assignee*) cat "$fix/closed-issues.json" ;;
+search/issues*q=is:closed+mentions*) cat "$fix/closed-mentions.json" ;;
+notifications*) cat "$fix/notifications.json" ;;
+*) echo '[]' ;;
+esac

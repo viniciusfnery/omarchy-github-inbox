@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax check
+        run: bash -n fetch.sh tests/run.sh tests/bin/gh
+
+      - name: Shellcheck
+        run: shellcheck -S error fetch.sh tests/run.sh tests/bin/gh
+
+      - name: Manifest sanity
+        run: |
+          jq -e '.schemaVersion and .id and .name and .version
+                 and (.kinds | index("bar-widget"))
+                 and .entryPoints.barWidget' manifest.json
+
+      - name: Tests
+        run: tests/run.sh

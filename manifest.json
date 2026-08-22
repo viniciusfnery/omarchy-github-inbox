@@ -1,0 +1,70 @@
+{
+    "schemaVersion": 1,
+    "id": "viniciusfnery.github-inbox",
+    "name": "GitHub Inbox",
+    "version": "0.0.1",
+    "author": "Vinicius Nery",
+    "license": "MIT",
+    "description": "Your GitHub inbox in the bar: open PRs, review requests, assigned issues, mentions with read-state, notifications, and recent closures.",
+    "kinds": [
+        "bar-widget"
+    ],
+    "activation": "on-demand",
+    "entryPoints": {
+        "barWidget": "Panel.qml"
+    },
+    "barWidget": {
+        "displayName": "GitHub Inbox",
+        "description": "A bar chip with your open PR/review/issue count; the panel lists pull requests, review requests, issues, notifications (dismissed on click), mentions with unread dots, and recently closed items — org-filterable, fuzzy-searchable, fully keyboard-driven, every row opening in the browser.",
+        "category": "Development",
+        "defaultSection": "right",
+        "aliases": [
+            "github-inbox"
+        ],
+        "allowMultiple": false,
+        "defaults": {
+            "refreshIntervalSec": 300,
+            "mentionLimit": 30,
+            "closedDays": 30,
+            "closedLimit": 5
+        },
+        "schema": [
+            {
+                "key": "refreshIntervalSec",
+                "type": "integer",
+                "label": "Refresh interval (seconds)",
+                "min": 60,
+                "max": 3600,
+                "step": 60,
+                "defaultValue": 300
+            },
+            {
+                "key": "mentionLimit",
+                "type": "integer",
+                "label": "Mentions to track",
+                "min": 5,
+                "max": 50,
+                "step": 5,
+                "defaultValue": 30
+            },
+            {
+                "key": "closedDays",
+                "type": "integer",
+                "label": "Recently-closed window (days)",
+                "min": 7,
+                "max": 90,
+                "step": 1,
+                "defaultValue": 30
+            },
+            {
+                "key": "closedLimit",
+                "type": "integer",
+                "label": "Recently-closed rows per tab",
+                "min": 1,
+                "max": 20,
+                "step": 1,
+                "defaultValue": 5
+            }
+        ]
+    }
+}
