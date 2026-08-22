@@ -8,12 +8,12 @@ one click (or one keystroke) away from its page on GitHub.
 
 ## Sections
 
-- **Pull requests** — open PRs you authored or are assigned to (drafts dimmed)
-- **Review requests** — open PRs where your review was requested
-- **Issues** — open issues assigned to you
 - **Notifications** — your unread GitHub notifications, minus anything another
   section already represents; clicking a row dismisses it here *and* marks the
   thread read on GitHub
+- **Pull requests** — open PRs you authored or are assigned to (drafts dimmed)
+- **Review requests** — open PRs where your review was requested
+- **Issues** — open issues assigned to you
 - **Mentions** — the last 30 open threads you were mentioned in, with an
   unread dot that only lights up when *someone else* acts (your own comments
   and reactions never re-mark a thread) and clears when you open it
