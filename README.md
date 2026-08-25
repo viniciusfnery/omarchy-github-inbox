@@ -1,23 +1,23 @@
 # GitHub Inbox for Omarchy
 
 Your GitHub inbox in the [Omarchy](https://omarchy.org) bar: one chip with
-your open workload count, one panel with everything on your plate — every row
-one click (or one keystroke) away from its page on GitHub.
+your open workload count, one panel with everything on your plate. Every row
+is one click (or one keystroke) away from its page on GitHub.
 
 <img src="screenshot.png" width="415" alt="GitHub Inbox panel under the Omarchy bar, showing the org filter, fuzzy find, and the six sections">
 
 ## Sections
 
-- **Notifications** — your unread GitHub notifications, minus anything another
+- **Notifications**: your unread GitHub notifications, minus anything another
   section already represents; clicking a row dismisses it here *and* marks the
   thread read on GitHub
-- **Pull requests** — open PRs you authored or are assigned to (drafts dimmed)
-- **Review requests** — open PRs where your review was requested
-- **Issues** — open issues assigned to you
-- **Mentions** — the last 30 open threads you were mentioned in, with an
+- **Pull requests**: open PRs you authored or are assigned to (drafts dimmed)
+- **Review requests**: open PRs where your review was requested
+- **Issues**: open issues assigned to you
+- **Mentions**: the last 30 open threads you were mentioned in, with an
   unread dot that only lights up when *someone else* acts (your own comments
   and reactions never re-mark a thread) and clears when you open it
-- **Recently closed** — the 5 most recent closures (last 30 days) among your
+- **Recently closed**: the 5 most recent closures (last 30 days) among your
   PRs, assigned issues, and mention threads, per org tab
 
 The bar chip shows the octocat plus your open PR + review + issue count, and
@@ -62,7 +62,7 @@ omarchy plugin add https://github.com/viniciusfnery/omarchy-github-inbox.git --e
 
 ## Authentication
 
-The plugin rides the GitHub CLI's login — it never sees or stores a token
+The plugin rides the GitHub CLI's login. It never sees or stores a token
 itself. Sign in once:
 
 ```bash
@@ -72,14 +72,14 @@ gh auth login
 Pick **GitHub.com → HTTPS → Login with a web browser** and follow the device
 prompt; the token lands in your system keyring. Verify with `gh auth status`.
 The default scopes gh requests (`repo`, `read:org`) cover everything the
-plugin reads, including the notifications API. Until you're signed in — or
-whenever the token expires — the panel shows a "Not signed in — run: gh auth
-login" card instead of silently going empty, and recovers on its own within
+plugin reads, including the notifications API. Until you sign in (or whenever
+the token expires), the panel shows a "Not signed in: run gh auth login" card
+instead of silently going empty, and recovers on its own within
 30 seconds of you logging in.
 
 ## Settings
 
-Settings live in the widget's entry in `~/.config/omarchy/shell.json` — edit
+Settings live in the widget's entry in `~/.config/omarchy/shell.json`. Edit
 that file directly (it hot-reloads on save), or set values from the terminal:
 
 ```bash
@@ -112,13 +112,13 @@ rm -f ~/.cache/omarchy-github-tasks.json \
       ~/.local/state/omarchy/github-mentions-seen.json
 ```
 
-The plugin never touches your GitHub credentials — those belong to the
+The plugin never touches your GitHub credentials; those belong to the
 `gh` CLI (`gh auth logout` if you want them gone too).
 
 ## Development
 
 `fetch.sh` (the data collector) is covered by a token-free test suite that
-runs it against a fake `gh` serving fixtures — including regression tests for
+runs it against a fake `gh` serving fixtures, including regression tests for
 rate-limit garbage on stdout, oversized payloads, and cache poisoning:
 
 ```bash

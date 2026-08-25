@@ -48,7 +48,7 @@ fail() { jq -n --arg e "$1" '{error: $e, prs: [], reviews: [], issues: [], menti
 
 command -v jq >/dev/null || { echo '{"error":"jq not found","prs":[],"reviews":[],"issues":[],"mentions":[],"notifications":[]}'; exit 0; }
 command -v gh >/dev/null || fail "GitHub CLI (gh) not found"
-gh auth status >/dev/null 2>&1 || fail "Not signed in — run: gh auth login"
+gh auth status >/dev/null 2>&1 || fail "Not signed in: run gh auth login"
 
 user=$(gh api user --jq .login 2>/dev/null) || fail "GitHub API unreachable"
 
