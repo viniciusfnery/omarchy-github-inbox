@@ -67,7 +67,7 @@ Panel {
     }
     next[String(item.url || "")] = String(item.updatedAt || "")
     seen = next
-    seenFile.setText(JSON.stringify(next))
+    writeSeen(JSON.stringify(next))
     // Keep GitHub's inbox in agreement — the dot rule reads it.
     markThreadRead(item.threadId)
   }
@@ -298,10 +298,10 @@ Panel {
   }
 
   function openUrl(url) {
-    // URLs come from the GitHub API; the quote check keeps anything else out
-    // of the shell command line.
+    // Only github.com, and never a quote that could escape the shell single
+    // quoting: a poisoned cache must not be able to open anything else.
     var target = String(url || "")
-    if (target.indexOf("https://") !== 0 || target.indexOf("'") >= 0 || root.bar === null) return
+    if (target.indexOf("https://github.com/") !== 0 || target.indexOf("'") >= 0 || root.bar === null) return
     root.bar.run("omarchy-launch-browser '" + target + "'")
     root.close()
   }
@@ -386,17 +386,31 @@ Panel {
   readonly property string seenPath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
     + "/omarchy/github-mentions-seen.json"
 
-  // Watcher and atomic writer only — never a reader: FileView has no size
-  // bound and would hang opening a planted FIFO. preload:false and never
-  // calling text() keep it from reading.
+  // Watcher only, never a reader or writer: FileView has no size bound and
+  // would hang opening a planted FIFO. preload:false and never calling
+  // text() keep it from reading.
   FileView {
     id: seenFile
     path: root.seenPath
     preload: false
     watchChanges: true
-    atomicWrites: true
     printErrors: false
     onFileChanged: root.readSeen()
+  }
+
+  // Writes go through umask 077 + temp + atomic rename: the file lists
+  // private repo URLs and must not be world-readable (FileView cannot set
+  // modes), and the predictable path must never be opened for writing.
+  Process {
+    id: seenWriteProcess
+    running: false
+  }
+
+  function writeSeen(json) {
+    seenWriteProcess.command = ["bash", "-c",
+      'umask 077; mkdir -p "$(dirname "$1")" && tmp=$(mktemp "$1.XXXXXX") && printf "%s\n" "$2" >"$tmp" && mv -f "$tmp" "$1"',
+      "--", seenPath, json]
+    seenWriteProcess.running = true
   }
 
   // Bounded read of the user-writable seen file: 256KB cap, refuses
