@@ -34,11 +34,18 @@ while (( $# > 0 )); do
 done
 
 # The cache collapses the per-monitor bar instances into one API burst.
-# Served only when non-empty and parseable — a poisoned cache must never
-# loop back into the panel.
-if [[ -s $cache && $(($(date +%s) - $(stat -c %Y "$cache"))) -lt 60 ]] && jq -e . "$cache" >/dev/null 2>&1; then
-  cat "$cache"
-  exit 0
+# Served only when fresh, parseable, and read through a bounded no-follow
+# nonblocking open: the path is predictable and user-writable, so a planted
+# FIFO must not stall this helper and an oversized file must not be emitted
+# wholesale. A poisoned or truncated cache falls through to a fresh fetch.
+read_bounded() { dd if="$1" iflag=nofollow,nonblock bs=64k count=32 status=none 2>/dev/null; }
+
+if [[ -f $cache && ! -L $cache && $(($(date +%s) - $(stat -c %Y "$cache"))) -lt 60 ]]; then
+  cached=$(read_bounded "$cache")
+  if [[ -n $cached ]] && jq -e . <<<"$cached" >/dev/null 2>&1; then
+    printf '%s\n' "$cached"
+    exit 0
+  fi
 fi
 
 fail() { jq -n --arg e "$1" '{error: $e, prs: [], reviews: [], issues: [], mentions: [], notifications: []}'; exit 0; }
@@ -134,7 +141,14 @@ def notifUrl:
   }))
 }') || fail "Failed to assemble GitHub data"
 
-# Cache only a successful, non-empty result — tee-ing the pipeline used to
-# truncate the cache to zero bytes whenever jq died.
 [[ -n $out ]] || fail "Empty result from GitHub"
-printf '%s\n' "$out" | tee "$cache"
+# API page caps keep the result small; anything larger means something is
+# feeding us garbage and must not reach the shell or the cache.
+(( ${#out} <= 2097152 )) || fail "GitHub data unexpectedly large"
+printf '%s\n' "$out"
+# Cache via temp file + atomic rename: never open the predictable cache path
+# for writing (a planted FIFO would block; a symlink would redirect the
+# write), and never leave a truncated file behind.
+if tmp=$(mktemp "$cache.XXXXXX" 2>/dev/null); then
+  printf '%s\n' "$out" >"$tmp" && mv -f "$tmp" "$cache" || rm -f "$tmp"
+fi

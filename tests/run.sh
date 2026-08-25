@@ -167,6 +167,42 @@ bash "$FETCH" --mark-read 42 >/dev/null
 t "mark-read: PATCHes the thread and drops the cache" \
   "$(grep -q 'api --method PATCH notifications/threads/42' "$FAKE_GH_LOG" && [[ ! -e $CACHE ]] && echo true || echo false)"
 
+# ------------------------------------------------- hostile cache-path shapes
+fresh_env
+mkfifo "$CACHE"
+out=$(timeout 10 bash "$FETCH")
+t "fifo cache: no hang, fresh data served" \
+  "$([[ $? -ne 124 ]] && jqt '.error == "" and (.prs | length == 2)' "$out")"
+t "fifo cache: replaced by a regular file" \
+  "$([[ -f $CACHE && ! -p $CACHE ]] && echo true || echo false)"
+
+fresh_env
+echo '{"error":"","prs":[1],"reviews":[],"issues":[],"mentions":[],"notifications":[],"closed":[]}' >"$TMP/target.json"
+ln -s "$TMP/target.json" "$CACHE"
+out=$(timeout 10 bash "$FETCH")
+t "symlink cache: never followed, fresh data served" \
+  "$(jqt '.prs | length == 2' "$out")"
+t "symlink cache: replaced by regular file, target untouched" \
+  "$([[ -f $CACHE && ! -L $CACHE ]] && jqt '.prs == [1]' "$(cat "$TMP/target.json")")"
+
+fresh_env
+jq -n '{error: "", pad: [range(30000) | "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"], prs: []}' >"$CACHE"
+size=$(wc -c <"$CACHE")
+out=$(timeout 10 bash "$FETCH")
+t "oversized cache (${size}B): bounded read rejects it, fresh data served" \
+  "$([[ $size -gt 2500000 ]] && jqt '.prs | length == 2' "$out")"
+
+fresh_env
+long=$(printf 'x%.0s' $(seq 1 2000))
+jq -n --arg t "$long" --arg d "$(iso "1 hour ago")" '[range(2000) | {
+  id: (. + 500 | tostring), reason: "ci_activity", updated_at: $d,
+  subject: {title: ($t + (. | tostring)), type: "CheckSuite", url: null},
+  repository: {full_name: "acme/repo1", html_url: "https://github.com/acme/repo1"}}]' \
+  >"$FAKE_GH_FIXTURES/notifications.json"
+out=$(timeout 30 bash "$FETCH")
+t "oversized assembly: output ceiling produces error record, nothing cached" \
+  "$(jqt '(.error | contains("unexpectedly large")) and .prs == []' "$out")"
+
 echo
 echo "$pass passed, $fail failed"
 exit "$((fail > 0 ? 1 : 0))"
