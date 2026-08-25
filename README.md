@@ -139,6 +139,8 @@ CI runs the suite plus shellcheck and a manifest sanity check on every push.
   minute.
 - Lists cap at the 50 most recently updated per section (mentions 30, closed
   20 per type / last 30 days).
+- Rows only ever open `https://github.com/` URLs; GitHub Enterprise hosts are
+  not supported.
 
 ## License
 

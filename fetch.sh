@@ -91,6 +91,10 @@ def item: {
   repo: (.repository_url | sub(".*/repos/"; ""))
 } | .org = (.repo | split("/")[0]);
 
+# Rows are click-to-open: anything whose URL is not github.com is dropped so
+# a poisoned upstream document cannot plant a phishing link.
+def ghOnly: map(select(.url | startswith("https://github.com/")));
+
 # Only Issue/PR subject URLs map onto web URLs by string surgery; other
 # subject types must fall back to the repo page.
 def notifUrl:
@@ -105,16 +109,16 @@ def notifUrl:
 {
   user: $user,
   error: "",
-  prs: (($authored[0] + $assigned[0]) | unique_by(.id) | map(item) | sort_by(.updatedAt) | reverse),
-  reviews: ($reviews[0] | map(item) | sort_by(.updatedAt) | reverse),
-  issues: ($issues[0] | map(item) | sort_by(.updatedAt) | reverse),
+  prs: (($authored[0] + $assigned[0]) | unique_by(.id) | map(item) | ghOnly | sort_by(.updatedAt) | reverse),
+  reviews: ($reviews[0] | map(item) | ghOnly | sort_by(.updatedAt) | reverse),
+  issues: ($issues[0] | map(item) | ghOnly | sort_by(.updatedAt) | reverse),
   mentions: ($mentions[0] | map(.html_url as $u | item
-    + {threadId: ($threadByUrl[$u] // ""), notifUnread: ($threadByUrl | has($u))})),
+    + {threadId: ($threadByUrl[$u] // ""), notifUnread: ($threadByUrl | has($u))}) | ghOnly),
   closed: ((($closedPrs[0] | map(item + {kind: "pr", closedAt: (.closed_at // .updated_at)}))
     + ($closedIssues[0] | map(item + {kind: "issue", closedAt: (.closed_at // .updated_at)}))
     + ($closedMentions[0] | map(item
         + {kind: (if .pull_request then "pr" else "issue" end), closedAt: (.closed_at // .updated_at)})))
-    | unique_by(.url)
+    | ghOnly | unique_by(.url)
     | map(select((.closedAt | fromdateiso8601? // 0) > (now - $closedDays * 86400)))
     | sort_by(.closedAt) | reverse),
   # The mentions section owns mention events; team mentions stay because the
@@ -128,7 +132,7 @@ def notifUrl:
     org: (.repository.full_name | split("/")[0]),
     updatedAt: .updated_at,
     url: notifUrl
-  }))
+  }) | ghOnly)
 }') || fail "Failed to assemble GitHub data"
 
 [[ -n $out ]] || fail "Empty result from GitHub"

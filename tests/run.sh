@@ -203,6 +203,22 @@ out=$(timeout 30 bash "$FETCH")
 t "oversized assembly: output ceiling produces error record, nothing cached" \
   "$(jqt '(.error | contains("unexpectedly large")) and .prs == []' "$out")"
 
+# -------------------------------------------------------------- url allowlist
+fresh_env
+{
+  item 4 "Assigned issue" "acme/repo1" 4 issue "$(iso "2 days ago")"
+  jq -n --arg d "$(iso "1 hour ago")" '{id: 99, title: "Planted phishing row", number: 9,
+    draft: false, updated_at: $d, html_url: "https://evil.example/login",
+    repository_url: "https://api.github.com/repos/acme/repo1"}'
+} | jq -s . >"$FAKE_GH_FIXTURES/issues.json"
+jq -n --arg d "$(iso "1 hour ago")" '[{id: "77", reason: "ci_activity", updated_at: $d,
+  subject: {title: "CI", type: "CheckSuite", url: null},
+  repository: {full_name: "acme/repo1", html_url: "https://evil.example"}}]' \
+  >"$FAKE_GH_FIXTURES/notifications.json"
+out=$(bash "$FETCH")
+t "url allowlist: non-github.com rows are dropped everywhere" \
+  "$(jqt '(.issues | length == 1) and (.issues[0].url | startswith("https://github.com/")) and (.notifications | length == 0)' "$out")"
+
 echo
 echo "$pass passed, $fail failed"
 exit "$((fail > 0 ? 1 : 0))"
