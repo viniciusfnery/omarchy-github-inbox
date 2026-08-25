@@ -95,6 +95,7 @@ Panel {
   }
 
   function applySeen(text) {
+    if (String(text || "").length > 262144) return
     try {
       var parsed = JSON.parse(text)
       if (parsed && typeof parsed === "object") seen = parsed
@@ -310,6 +311,11 @@ Panel {
   }
 
   function applyFetch(text) {
+    // fetch.sh enforces its own output ceiling; this is the shell-side line.
+    if (String(text || "").length > 4194304) {
+      retryTimer.restart()
+      return
+    }
     var parsed = null
     try {
       parsed = JSON.parse(text)
@@ -377,18 +383,40 @@ Panel {
     referenceItem: panelFlick
   }
 
+  readonly property string seenPath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
+    + "/omarchy/github-mentions-seen.json"
+
+  // Watcher and atomic writer only — never a reader: FileView has no size
+  // bound and would hang opening a planted FIFO. preload:false and never
+  // calling text() keep it from reading.
   FileView {
     id: seenFile
-    path: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
-      + "/omarchy/github-mentions-seen.json"
-    // Watched so the panel instance on the other monitor drops its dot too
-    // when a mention is opened on this one.
+    path: root.seenPath
+    preload: false
     watchChanges: true
     atomicWrites: true
     printErrors: false
-    onLoaded: root.applySeen(text())
-    onFileChanged: reload()
+    onFileChanged: root.readSeen()
   }
+
+  // Bounded read of the user-writable seen file: 256KB cap, refuses
+  // symlinks, and a FIFO yields EAGAIN instead of blocking a shell thread.
+  Process {
+    id: seenReadProcess
+    running: false
+    command: ["dd", "if=" + root.seenPath, "iflag=nofollow,nonblock", "bs=64k", "count=4", "status=none"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applySeen(text)
+    }
+  }
+
+  function readSeen() {
+    if (!seenReadProcess.running) seenReadProcess.running = true
+  }
+
+  Component.onCompleted: readSeen()
 
   Process {
     id: fetchProcess
