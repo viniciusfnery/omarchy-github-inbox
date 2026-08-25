@@ -1,7 +1,6 @@
 #!/bin/bash
-# Emits the signed-in user's GitHub inbox as one JSON document on stdout.
-# omarchy-shell's environment may lack version-manager shims, so extend PATH
-# for gh installed via mise; harmless when absent.
+# omarchy-shell's environment may lack version-manager shims; extend PATH for
+# gh installed via mise — harmless when absent.
 export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
 
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-github-tasks.json"
@@ -12,8 +11,7 @@ closed_days=30
 
 while (( $# > 0 )); do
   case "$1" in
-  # Mark one notification thread read; drop the cache so the next refresh
-  # can't resurrect the dismissed row from a stale snapshot.
+  # The cache drop keeps the next refresh from resurrecting the dismissed row.
   --mark-read)
     rm -f "$cache"
     [[ -n ${2:-} ]] && gh api --method PATCH "notifications/threads/$2" >/dev/null 2>&1
@@ -33,11 +31,9 @@ while (( $# > 0 )); do
   esac
 done
 
-# The cache collapses the per-monitor bar instances into one API burst.
-# Served only when fresh, parseable, and read through a bounded no-follow
-# nonblocking open: the path is predictable and user-writable, so a planted
-# FIFO must not stall this helper and an oversized file must not be emitted
-# wholesale. A poisoned or truncated cache falls through to a fresh fetch.
+# The cache collapses the per-monitor bar instances into one API burst. Its
+# path is predictable and user-writable: dd's nofollow/nonblock/count keep a
+# planted FIFO, symlink, or oversized file from stalling or flooding us.
 read_bounded() { dd if="$1" iflag=nofollow,nonblock bs=64k count=32 status=none 2>/dev/null; }
 
 if [[ -f $cache && ! -L $cache && $(($(date +%s) - $(stat -c %Y "$cache"))) -lt 60 ]]; then
@@ -56,9 +52,8 @@ gh auth status >/dev/null 2>&1 || fail "Not signed in — run: gh auth login"
 
 user=$(gh api user --jq .login 2>/dev/null) || fail "GitHub API unreachable"
 
-# gh api prints the error body to stdout on HTTP failures (e.g. rate limits),
-# so trusting the exit code alone would hand jq garbage. Only pass output
-# through when it is actually a JSON array.
+# gh api prints error bodies to stdout on HTTP failures, so exit codes alone
+# cannot be trusted — only pass through actual JSON arrays.
 as_array() { jq -e 'type == "array"' >/dev/null 2>&1 <<<"$1" && echo "$1" || echo '[]'; }
 
 search() { as_array "$(gh api "search/issues?q=$1&sort=updated&order=desc&per_page=$2" --jq '.items' 2>/dev/null)"; }
@@ -69,8 +64,6 @@ assigned=$(search "is:open+is:pr+assignee:@me+archived:false" 50)
 # ponytail: direct review requests only; add team-review-requested:org/team queries if team reviews matter
 reviews=$(search "is:open+is:pr+review-requested:@me+archived:false" 50)
 issues=$(search "is:open+is:issue+assignee:@me+archived:false" 50)
-# Mentions on still-open issues/PRs, newest activity first; the panel tracks
-# read state locally, since GitHub has no "mention read" concept.
 mentions=$(search "is:open+mentions:@me" "$mention_limit")
 # ponytail: 20-deep recency window per type; an org whose last closure is older
 # than that shows fewer than 5 in its Recently Closed tab
@@ -81,9 +74,8 @@ closed_issues=$(search "is:closed+is:issue+assignee:@me+archived:false" 20)
 closed_mentions=$(search "is:closed+mentions:@me+archived:false" 20)
 notifications=$(as_array "$(gh api "notifications?per_page=50" 2>/dev/null)")
 
-# The blobs go in as files (--slurpfile + process substitution), never as
-# argv: a busy night of notifications once blew past the kernel's 128KB
-# per-argument limit and took the whole pipeline down with E2BIG.
+# Blobs go in as files (--slurpfile), never argv: a large notification set
+# once blew past the kernel's 128KB per-argument limit (E2BIG).
 out=$(jq -n --arg user "$user" --argjson closedDays "$closed_days" \
   --slurpfile authored <(printf '%s' "$authored") \
   --slurpfile assigned <(printf '%s' "$assigned") \
@@ -99,9 +91,8 @@ def item: {
   repo: (.repository_url | sub(".*/repos/"; ""))
 } | .org = (.repo | split("/")[0]);
 
-# Issue/PR notification subjects carry an API URL that maps onto the web URL
-# by string surgery; other subject types (releases, check suites) do not, so
-# they land on the repo page instead.
+# Only Issue/PR subject URLs map onto web URLs by string surgery; other
+# subject types must fall back to the repo page.
 def notifUrl:
   if (.subject.type == "PullRequest" or .subject.type == "Issue") and .subject.url
   then (.subject.url | sub("api\\.github\\.com/repos"; "github.com") | sub("/pulls/"; "/pull/"))
@@ -126,9 +117,8 @@ def notifUrl:
     | unique_by(.url)
     | map(select((.closedAt | fromdateiso8601? // 0) > (now - $closedDays * 86400)))
     | sort_by(.closedAt) | reverse),
-  # The mentions section owns mention events (with its own read-state), so a
-  # mention never shows twice. Team mentions stay: the mentions search cannot
-  # see them.
+  # The mentions section owns mention events; team mentions stay because the
+  # mentions search cannot see them.
   notifications: ($notifications[0] | map(select(.reason != "mention")) | map({
     threadId: (.id | tostring),
     title: .subject.title,
@@ -142,13 +132,11 @@ def notifUrl:
 }') || fail "Failed to assemble GitHub data"
 
 [[ -n $out ]] || fail "Empty result from GitHub"
-# API page caps keep the result small; anything larger means something is
-# feeding us garbage and must not reach the shell or the cache.
+# API page caps keep real results far below this; larger means garbage.
 (( ${#out} <= 2097152 )) || fail "GitHub data unexpectedly large"
 printf '%s\n' "$out"
-# Cache via temp file + atomic rename: never open the predictable cache path
-# for writing (a planted FIFO would block; a symlink would redirect the
-# write), and never leave a truncated file behind.
+# Temp file + atomic rename: never open the predictable path for writing
+# (a FIFO would block, a symlink would redirect the write).
 if tmp=$(mktemp "$cache.XXXXXX" 2>/dev/null); then
   printf '%s\n' "$out" >"$tmp" && mv -f "$tmp" "$cache" || rm -f "$tmp"
 fi

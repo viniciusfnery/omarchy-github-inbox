@@ -386,11 +386,9 @@ Panel {
   readonly property string seenPath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")
     + "/omarchy/github-mentions-seen.json"
 
-  // Watcher and atomic writer only — never a reader: FileView loads files
-  // wholesale with no size bound and its open would hang on a planted FIFO.
-  // preload:false and never calling text() keep it from reading at all;
-  // watchChanges syncs the other monitor's instance when a mention is
-  // opened on this one.
+  // Watcher and atomic writer only — never a reader: FileView has no size
+  // bound and would hang opening a planted FIFO. preload:false and never
+  // calling text() keep it from reading.
   FileView {
     id: seenFile
     path: root.seenPath
@@ -401,9 +399,8 @@ Panel {
     onFileChanged: root.readSeen()
   }
 
-  // Bounded no-follow nonblocking read of the user-writable seen file:
-  // 256KB cap, refuses symlinks, and a FIFO yields EAGAIN instead of
-  // blocking a shell thread.
+  // Bounded read of the user-writable seen file: 256KB cap, refuses
+  // symlinks, and a FIFO yields EAGAIN instead of blocking a shell thread.
   Process {
     id: seenReadProcess
     running: false
