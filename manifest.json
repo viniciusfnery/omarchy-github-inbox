@@ -15,7 +15,7 @@
     },
     "barWidget": {
         "displayName": "GitHub Inbox",
-        "description": "A bar chip with your open PR/review/issue count; the panel lists pull requests, review requests, issues, notifications (dismissed on click), mentions with unread dots, and recently closed items — org-filterable, fuzzy-searchable, fully keyboard-driven, every row opening in the browser.",
+        "description": "A bar chip with your open PR/review/issue count; the panel lists pull requests, review requests, issues, notifications (dismissed on click), mentions with unread dots, and recently closed items: org-filterable, fuzzy-searchable, fully keyboard-driven, every row opening in the browser.",
         "category": "Development",
         "defaultSection": "right",
         "aliases": [
