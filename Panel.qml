@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import Quickshell
+import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -488,12 +489,23 @@ Panel {
     }
   }
 
-  // Only one monitor's instance owns the IPC target; the bar's router picks
-  // the instance a hotkey should act on (open one first, else focused monitor).
+  // One instance per monitor, but only one owns the IPC target, and the bar
+  // facade handed to third-party widgets has no findPanelWidget. Open copy
+  // wins, then the focused monitor's copy. Zero-size copies are the hidden
+  // placeholders a center-anchored layout keeps around.
   function routedInstance() {
-    var item = bar && typeof bar.findPanelWidget === "function"
-      ? bar.findPanelWidget(moduleName) : null
-    return item || root
+    var items = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    var monitor = Hyprland.focusedMonitor
+    var focused = monitor ? String(monitor.name || "") : ""
+    var onFocused = null
+    for (var i = 0; i < items.length; i++) {
+      var item = items[i]
+      if (!item || item.visible !== true || item.width <= 0 || item.height <= 0) continue
+      if (item.opened === true) return item
+      var window = item.QsWindow ? item.QsWindow.window : null
+      if (!onFocused && focused && window && window.screen && String(window.screen.name || "") === focused) onFocused = item
+    }
+    return onFocused || root
   }
 
   IpcHandler {
