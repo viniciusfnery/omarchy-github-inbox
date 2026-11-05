@@ -1694,7 +1694,7 @@ Panel {
 
       // Scrolling the preview. The key catcher sees Shift+j as a plain "j"
       // (it would move the cursor), so these are shortcuts, which Qt handles
-      // before the key reaches it. Off while a comment is being typed.
+      // before the key reaches it. Off while a comment or a search is typed.
       // The only key that confirms a merge: a fresh Enter, never a repeat.
       Shortcut {
         sequences: ["Return", "Enter"]
@@ -1704,12 +1704,12 @@ Panel {
       }
       Shortcut {
         sequences: ["Shift+J", StandardKey.MoveToNextPage]
-        enabled: root.previewOpen && !root.commentFocused
+        enabled: root.previewOpen && !root.commentFocused && !searchField.activeFocus
         onActivated: root.scrollPreview(1)
       }
       Shortcut {
         sequences: ["Shift+K", StandardKey.MoveToPreviousPage]
-        enabled: root.previewOpen && !root.commentFocused
+        enabled: root.previewOpen && !root.commentFocused && !searchField.activeFocus
         onActivated: root.scrollPreview(-1)
       }
 
