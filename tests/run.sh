@@ -230,6 +230,75 @@ wait_for '[[ $(grep -c "^notify-send" "$FAKE_GH_LOG") -eq 1 ]]'
 t "notify: body markup is escaped, summary stays as given" \
   "$(grep -qF -- "-- Title <b>x</b> &lt;a href='https://evil.example'&gt;click&lt;/a&gt; &amp; more" "$FAKE_GH_LOG" && echo true || echo false)"
 
+# ------------------------------------------------------------------ preview
+PREVIEW="$PWD/preview.sh"
+pr_fixture() {
+  long=$(printf 'b%.0s' $(seq 1 5000))
+  jq -n --arg long "$long" '{number: 7, title: "Fix it", state: "OPEN", isDraft: false,
+    author: {login: "alice"}, createdAt: "2026-01-01T00:00:00Z", body: ("intro\n" + $long),
+    labels: [{name: "bug"}], reviewDecision: "APPROVED", mergeable: "MERGEABLE",
+    mergeStateStatus: "CLEAN", additions: 10, deletions: 2, changedFiles: 3,
+    baseRefName: "main", headRefName: "fix", headRefOid: "abc123",
+    url: "https://github.com/acme/repo1/pull/7",
+    statusCheckRollup: [
+      {__typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS"},
+      {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
+      {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
+      {__typename: "StatusContext", state: "SUCCESS"}],
+    comments: [range(6) | {author: {login: ("u" + tostring)}, createdAt: "2026-01-02T00:00:00Z",
+      body: ("comment " + tostring + " " + $long)}]}' >"$FAKE_GH_FIXTURES/pr-view.json"
+}
+
+fresh_env
+pr_fixture
+out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+t "preview: a PR comes back normalized" \
+  "$(jqt '.kind == "pr" and .number == 7 and .author == "alice" and .labels == ["bug"] and .headSha == "abc123" and .mergeable == "MERGEABLE"' "$out")"
+t "preview: checks are counted, not listed" \
+  "$(jqt '.checks == {passed: 2, failed: 1, pending: 1}' "$out")"
+t "preview: body and comments are cut to size, only the last 3 comments" \
+  "$(jqt '(.body | length) <= 1201 and (.comments | length) == 3 and .comments[0].author == "u3" and ([.comments[].body | length] | max) <= 401' "$out")"
+t "preview: merge methods follow the repo settings, squash first" \
+  "$(jqt '.mergeMethods == ["squash", "rebase"]' "$out")"
+
+fresh_env
+for bad in "https://evil.example/acme/repo1/pull/7" "https://github.com/acme/repo1/pull/7x" \
+  "https://github.com/acme/repo1/pull/7/../../x" "https://github.com/acme/repo1/commits/7" "--repo=x"; do
+  out=$(bash "$PREVIEW" view "$bad")
+  [[ $(jq -r '.error' <<<"$out") == "Not a GitHub pull request or issue" ]] || { t "preview: rejects $bad" false; continue; }
+done
+t "preview: anything but a github.com PR or issue URL is refused before gh runs" \
+  "$([[ ! -s $FAKE_GH_LOG ]] && echo true || echo false)"
+
+fresh_env
+export FAKE_GH_PREVIEW_FAIL=1
+out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/issues/3")
+t "preview: a gh failure is an error record" "$(jqt '.error | length > 0' "$out")"
+unset FAKE_GH_PREVIEW_FAIL
+
+fresh_env
+# The comment travels on stdin, never argv, which any local user can read.
+printf '%s' 'Looks good; $(id) stays text' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issues/3" >/dev/null
+t "preview: comment goes to the issue on stdin, byte for byte" \
+  "$(grep -qxF 'issue comment https://github.com/acme/repo1/issues/3 --body-file -' "$FAKE_GH_LOG" && grep -qxF 'stdin: Looks good; $(id) stays text' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+out=$(printf '   ' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
+t "preview: an empty comment is refused" "$(jqt '.error | length > 0' "$out")"
+
+fresh_env
+bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 >/dev/null
+t "preview: merge pins the head commit that was shown" \
+  "$(grep -qxF 'pr merge https://github.com/acme/repo1/pull/7 --squash --match-head-commit abc123' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" octopus abc123)
+out2=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash "")
+out3=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/issues/7" squash abc123)
+verdicts="$(jqt '.error | length > 0' "$out") $(jqt '.error | length > 0' "$out2") $(jqt '.error | length > 0' "$out3")"
+t "preview: merge refuses an unknown method, a missing head sha, or an issue" \
+  "$([[ $verdicts == "true true true" && ! -s $FAKE_GH_LOG ]] && echo true || echo false)"
+
 # ------------------------------------------------- hostile cache-path shapes
 fresh_env
 mkfifo "$CACHE"

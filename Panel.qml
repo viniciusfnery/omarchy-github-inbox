@@ -20,6 +20,7 @@ Panel {
 
   readonly property string scriptPath: Qt.resolvedUrl("fetch.sh").toString().replace(/^file:\/\//, "")
   readonly property string notifyPath: Qt.resolvedUrl("notify.sh").toString().replace(/^file:\/\//, "")
+  readonly property string previewPath: Qt.resolvedUrl("preview.sh").toString().replace(/^file:\/\//, "")
 
   // Never name this `data`: that shadows Item's default property and steals
   // every declared child from the scene.
@@ -372,6 +373,7 @@ Panel {
   property real keysScrollY: 0
   onKeysOpenChanged: {
     if (!panelFlick) return
+    if (keysOpen && previewOpen) closePreview()
     if (keysOpen) { keysScrollY = panelFlick.contentY; panelFlick.contentY = 0; keyCatcher.forceActiveFocus() }
     else Qt.callLater(function() { panelFlick.contentY = keysScrollY })
   }
@@ -451,6 +453,7 @@ Panel {
   property real inboxScrollY: 0
 
   function openSettings(fromKeyboard) {
+    if (previewOpen) closePreview()
     // Over the legend the list's own position is the one the legend saved.
     if (!settingsOpen && panelFlick) inboxScrollY = keysOpen ? keysScrollY : panelFlick.contentY
     keysOpen = false
@@ -507,6 +510,221 @@ Panel {
     }
   }
 
+  // ------------------------------------------------ preview
+  //
+  // `p` opens a pane beside the list for the PR or issue under the cursor,
+  // and it follows the cursor. From there: open, comment, merge. Comment and
+  // merge post to GitHub as the user, so each is an explicit second step,
+  // and a merge is pinned to the head commit the pane showed.
+  property bool previewOpen: false
+  property string previewUrl: ""
+  property var previewData: null
+  property string previewError: ""
+  property bool previewLoading: false
+  property var previewCache: Inbox.dict()
+  property string previewMode: ""          // "", "comment" or "merge"
+  property string previewNotice: ""
+  property bool previewNoticeError: false
+  property bool actionBusy: false
+  property string mergeMethod: ""
+  property bool commentFocused: false
+  property int commentSerial: 0
+
+  function focusList() { keyCatcher.forceActiveFocus() }
+
+  function previewableUrl(url) {
+    return /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/(pull|issues)\/[0-9]+$/.test(String(url || ""))
+  }
+
+  readonly property string cursorUrl: {
+    var row = rowAt(cursor)
+    return row && row.item && previewableUrl(row.item.url) ? String(row.item.url) : ""
+  }
+
+  function togglePreview() {
+    if (previewOpen) closePreview()
+    else openPreview()
+  }
+
+  function openPreview() {
+    if (cursorUrl === "") return
+    previewOpen = true
+    showPreview(cursorUrl)
+  }
+
+  function closePreview() {
+    previewOpen = false
+    previewMode = ""
+    keyCatcher.forceActiveFocus()
+  }
+
+  // Following the cursor waits a moment, so j/k through a list does not
+  // fire one gh call per row.
+  onCursorUrlChanged: if (previewOpen && previewMode === "" && cursorUrl !== "") previewDebounce.restart()
+  Timer {
+    id: previewDebounce
+    interval: 180
+    onTriggered: root.showPreview(root.cursorUrl)
+  }
+
+  function showPreview(url) {
+    previewUrl = url
+    previewNotice = ""
+    previewMode = ""
+    var hit = Inbox.has(previewCache, url) ? previewCache[url] : null
+    if (hit && Date.now() - hit.at < 60000) {
+      previewData = hit.data
+      previewError = ""
+      previewLoading = false
+      return
+    }
+    previewLoading = true
+    loadPreview()
+  }
+
+  // One gh call at a time. A cursor that moved on while it ran gets its own
+  // call as soon as this one ends, and the stale answer only fills the cache.
+  function loadPreview() {
+    if (previewProcess.running || previewUrl === "") return
+    previewProcess.requested = previewUrl
+    previewProcess.command = ["bash", previewPath, "view", previewUrl]
+    previewProcess.running = true
+  }
+
+  function applyPreview(text, url) {
+    var parsed = null
+    if (String(text || "").length <= 1048576) {
+      try { parsed = JSON.parse(text) } catch (e) { parsed = null }
+    }
+    if (!parsed || typeof parsed !== "object") parsed = { error: "Unreadable preview data" }
+    var ok = String(parsed.error || "") === "" && parsed.url === url
+    if (ok) {
+      var next = Object.keys(previewCache).length > 50 ? Inbox.dict() : Inbox.copy(previewCache)
+      next[url] = { data: parsed, at: Date.now() }
+      previewCache = next
+    }
+    if (url !== previewUrl) return
+    previewLoading = false
+    previewError = ok ? "" : String(parsed.error || "Unreadable preview data")
+    previewData = ok ? parsed : null
+  }
+
+  Process {
+    id: previewProcess
+    property string requested: ""
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPreview(text, previewProcess.requested)
+    }
+    onRunningChanged: if (!running && root.previewLoading && root.previewUrl !== requested) Qt.callLater(root.loadPreview)
+  }
+
+  // Why the merge button cannot merge, or "" when it can.
+  readonly property string mergeBlock: {
+    var d = previewData
+    if (!d || d.kind !== "pr") return "Only pull requests merge"
+    if (d.state === "MERGED") return "Already merged"
+    if (d.state === "CLOSED") return "Closed"
+    if (d.state === "DRAFT") return "Draft: mark it ready for review first"
+    if (d.mergeable === "CONFLICTING") return "Has conflicts with " + d.base
+    if (d.mergeable !== "MERGEABLE") return "GitHub is still checking mergeability"
+    if (d.mergeState === "BLOCKED") return "Blocked by required reviews or checks"
+    if (d.mergeState === "BEHIND") return "Behind " + d.base + ": update the branch first"
+    if (!d.mergeMethods || d.mergeMethods.length === 0) return "Merging is turned off for this repo"
+    if (!d.headSha) return "Head commit unknown"
+    return ""
+  }
+
+  function startComment() {
+    if (!previewData || actionBusy) return
+    previewNotice = ""
+    previewMode = "comment"
+  }
+
+  function startMerge() {
+    if (!previewData || actionBusy) return
+    if (mergeBlock !== "") { notice(mergeBlock, true); return }
+    mergeMethod = previewData.mergeMethods[0]
+    previewNotice = ""
+    previewMode = "merge"
+  }
+
+  function cycleMergeMethod(delta) {
+    var methods = previewData && previewData.mergeMethods ? previewData.mergeMethods : []
+    if (methods.length < 2) return
+    var i = methods.indexOf(mergeMethod)
+    mergeMethod = methods[((i + delta) % methods.length + methods.length) % methods.length]
+  }
+
+  function notice(text, isError) {
+    previewNotice = text
+    previewNoticeError = isError === true
+  }
+
+  function sendComment(text) {
+    if (actionBusy || String(text || "").trim() === "" || previewUrl === "") return
+    actionBusy = true
+    actionProcess.kind = "comment"
+    actionProcess.target = previewUrl
+    actionProcess.payload = String(text)
+    actionProcess.stdinEnabled = true
+    actionProcess.command = ["bash", previewPath, "comment", previewUrl]
+    actionProcess.running = true
+  }
+
+  function confirmMerge() {
+    if (actionBusy || mergeBlock !== "" || previewMode !== "merge") return
+    actionBusy = true
+    actionProcess.kind = "merge"
+    actionProcess.target = previewUrl
+    actionProcess.payload = ""
+    actionProcess.stdinEnabled = false
+    actionProcess.command = ["bash", previewPath, "merge", previewUrl, mergeMethod, String(previewData.headSha)]
+    actionProcess.running = true
+  }
+
+  function actionFinished(text) {
+    actionBusy = false
+    var parsed = null
+    try { parsed = JSON.parse(text) } catch (e) { parsed = null }
+    var kind = actionProcess.kind
+    if (!parsed || parsed.ok !== true) {
+      notice(parsed && parsed.error ? String(parsed.error) : "GitHub did not answer", true)
+      return
+    }
+    if (kind === "comment") commentSerial++
+    previewMode = ""
+    notice(kind === "merge" ? "Merged" : "Comment posted", false)
+    // Show what GitHub now says, and let the list catch up with a merge.
+    var next = Inbox.copy(previewCache)
+    delete next[actionProcess.target]
+    previewCache = next
+    if (previewUrl === actionProcess.target) {
+      previewLoading = true
+      loadPreview()
+    }
+    if (kind === "merge") refreshNow()
+  }
+
+  // Comment text goes in on stdin, never argv, which any local user can read.
+  Process {
+    id: actionProcess
+    property string kind: ""
+    property string target: ""
+    property string payload: ""
+    running: false
+    onStarted: {
+      if (kind === "comment") write(payload)
+      payload = ""
+      stdinEnabled = false
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.actionFinished(text)
+    }
+  }
+
   // The line under the list: what the keys do for the row under the cursor.
   function hintText() {
     if (lastUndo) {
@@ -517,6 +735,10 @@ Panel {
                        : " · u or click to undo (" + left + "s)")
     }
     if (keysOpen) return "? or Esc back"
+    if (previewOpen && previewMode === "merge")
+      return "↵ confirm merge" + (previewData && previewData.mergeMethods && previewData.mergeMethods.length > 1 ? " · h/l method" : "") + " · Esc cancel"
+    if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
+    if (previewOpen) return "j/k follow · ↵ open · c comment" + (previewData && previewData.kind === "pr" ? " · m merge" : "") + " · p close"
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
       if (!srow) return "space toggle · j/k move · s or Esc back"
@@ -525,8 +747,9 @@ Panel {
         + " · s back"
     }
     var row = cursorActive ? rowAt(cursor) : null
-    if (row && row.notification) return "↵ open · d dismiss · D dismiss all · ? keys"
+    if (row && row.notification) return "↵ open · d dismiss · " + (previewableUrl(row.item.url) ? "p preview" : "D dismiss all") + " · ? keys"
     if (row && row.mention && mentionUnread(row.item)) return "↵ open · d mark seen · ? keys"
+    if (row && previewableUrl(row.item.url)) return "↵ open · p preview · / find · ? keys"
     return "j/k move · ↵ open · / find · s settings · ? keys"
   }
 
@@ -727,6 +950,8 @@ Panel {
   }
 
   // Find lives in the inbox, so it leaves settings and scrolls to the field.
+  function scrollPreview(direction) { previewPane.scrollBy(direction) }
+
   function openSearch() {
     keysOpen = false
     if (settingsOpen) closeSettings()
@@ -861,6 +1086,8 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
+    previewOpen = false
+    previewMode = ""
     sessionOrgs = Inbox.dict()
     cursorActive = false
     cursor = -1
@@ -1072,16 +1299,26 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + hintBar.implicitHeight
-      + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(640))
+    // The preview pane widens the panel; the bar keeps it on screen, so it
+    // grows away from the screen edge.
+    contentWidth: panel.fittedContentWidth(Style.space(root.previewOpen ? 852 : 400))
+    contentHeight: panel.fittedContentHeight(Math.max(column.implicitHeight,
+        root.previewOpen ? previewPane.implicitHeight : 0) + hintBar.implicitHeight
+      + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(root.previewOpen ? 720 : 640))
+    Behavior on contentWidth { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on contentHeight { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: searchField.activeFocus
+      blocked: searchField.activeFocus || root.commentFocused
 
       onMoveRequested: function(dx, dy) {
+        // Choosing how to merge: left and right pick the method, nothing moves.
+        if (root.previewOpen && root.previewMode === "merge") {
+          if (dx !== 0) root.cycleMergeMethod(dx)
+          return
+        }
         // Over the legend, up and down scroll it and nothing underneath moves.
         if (root.keysOpen) {
           var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
@@ -1099,10 +1336,18 @@ Panel {
         }
         if (dy !== 0) root.moveCursor(dy)
       }
-      onActivateRequested: if (!root.keysOpen) root.settingsOpen ? root.activateSettings() : root.activateCursor()
+      onActivateRequested: {
+        if (root.keysOpen) return
+        if (root.previewOpen && root.previewMode === "merge") root.confirmMerge()
+        else if (root.settingsOpen) root.activateSettings()
+        else if (root.previewOpen && root.previewUrl !== "") root.openUrl(root.previewUrl)
+        else root.activateCursor()
+      }
       onDeleteRequested: if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
       onCloseRequested: {
-        if (root.keysOpen) root.keysOpen = false
+        if (root.previewOpen && root.previewMode !== "") root.previewMode = ""
+        else if (root.previewOpen) root.closePreview()
+        else if (root.keysOpen) root.keysOpen = false
         else if (root.settingsOpen) root.closeSettings()
         else if (root.query !== "" || root.searchOpen) root.closeSearch()
         else root.close()
@@ -1111,8 +1356,16 @@ Panel {
       onTextKey: function(t) {
         // u, s and / still work over the legend: undo must never be blocked,
         // and the other two leave the legend for their view.
+        if (root.previewOpen && root.previewMode === "merge") {
+          if (t === "m") root.confirmMerge()
+          return
+        }
         if (t === "?") root.keysOpen = !root.keysOpen
         else if (t === "u") root.undoDismiss()
+        else if (t === "p" && !root.settingsOpen && !root.keysOpen) root.togglePreview()
+        else if (root.previewOpen && t === "c") root.startComment()
+        else if (root.previewOpen && t === "m") root.startMerge()
+        else if (root.previewOpen && (t === "J" || t === "K")) root.scrollPreview(t === "J" ? 1 : -1)
         else if (root.keysOpen && t !== "s" && !(t === "/" && !root.settingsOpen)) return
         else if (t === "s") {
           if (root.settingsOpen) root.closeSettings()
@@ -1128,6 +1381,19 @@ Panel {
         else if (t === "/") root.openSearch()
         else if (t === "]") root.jumpSection(1)
         else if (t === "[") root.jumpSection(-1)
+      }
+
+      PreviewPane {
+        id: previewPane
+        inbox: root
+        anchors.left: panelFlick.right
+        anchors.leftMargin: Style.space(12)
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: panelFlick.bottom
+        visible: width > Style.space(40)
+        opacity: root.previewOpen ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 160 } }
       }
 
       Text {
@@ -1179,7 +1445,7 @@ Panel {
       Flickable {
         id: panelFlick
         anchors.left: parent.left
-        anchors.right: parent.right
+        width: Math.min(parent.width, Style.space(400))
         anchors.top: parent.top
         anchors.bottom: failureLine.visible ? failureLine.top : hintBar.top
         contentWidth: width
@@ -1760,6 +2026,9 @@ Panel {
         ["d  x", "Dismiss, or clear a mention dot"],
         ["D", "Dismiss every notification shown"],
         ["u", "Undo a dismissal (5 seconds)"],
+        ["p", "Preview a PR or issue beside the list"],
+        ["c  m", "In a preview: comment, merge"],
+        ["J K", "Scroll the preview"],
         ["/", "Fuzzy find"],
         ["f", "Focus mode on or off"],
         ["s", "Settings"],
@@ -2185,6 +2454,23 @@ Panel {
       }
 
       PanelActionButton {
+        id: previewButton
+        visible: row.hasCursor && row.item && root.previewableUrl(row.item.url)
+        anchors.right: dismissButton.visible ? dismissButton.left : parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: "󰈈"
+        tooltipText: root.previewOpen && root.previewUrl === String(row.item ? row.item.url : "") ? "Close preview (p)" : "Preview (p)"
+        foreground: root.previewOpen && root.previewUrl === String(row.item ? row.item.url : "") ? root.foreground : root.dim
+        hoverColor: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: {
+          root.cursor = row.flatIndex
+          if (root.previewOpen && root.previewUrl === String(row.item.url)) root.closePreview()
+          else root.openPreview()
+        }
+      }
+
+      PanelActionButton {
         id: dismissButton
         visible: row.dismissable && row.hasCursor
         anchors.right: parent.right
@@ -2199,7 +2485,7 @@ Panel {
 
       Rectangle {
         id: unreadDot
-        visible: row.dotted && !dismissButton.visible
+        visible: row.dotted && !dismissButton.visible && !previewButton.visible
         width: Style.space(7)
         height: width
         radius: width / 2
@@ -2213,8 +2499,9 @@ Panel {
         spacing: Style.space(1)
         anchors.left: rowGlyph.right
         anchors.leftMargin: Style.space(10)
-        anchors.right: dismissButton.visible ? dismissButton.left : (unreadDot.visible ? unreadDot.left : parent.right)
-        anchors.rightMargin: dismissButton.visible || unreadDot.visible ? Style.space(8) : 0
+        anchors.right: previewButton.visible ? previewButton.left
+          : (dismissButton.visible ? dismissButton.left : (unreadDot.visible ? unreadDot.left : parent.right))
+        anchors.rightMargin: previewButton.visible || dismissButton.visible || unreadDot.visible ? Style.space(8) : 0
         anchors.verticalCenter: parent.verticalCenter
 
         Text {

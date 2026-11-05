@@ -10,6 +10,25 @@
 if [[ ${1:-} == auth ]]; then
   exit "${FAKE_GH_AUTH_FAIL:-0}"
 fi
+
+# preview.sh side entrance: pr/issue view, comment, merge.
+#   FAKE_GH_PREVIEW_FAIL=1 -> view prints an error and exits 1
+if [[ ${1:-} == pr || ${1:-} == issue ]]; then
+  kind=$1 verb=${2:-}
+  case $verb in
+  view)
+    if [[ ${FAKE_GH_PREVIEW_FAIL:-0} == 1 ]]; then echo "GraphQL: Could not resolve" >&2; exit 1; fi
+    cat "${FAKE_GH_FIXTURES:?}/$kind-view.json"
+    ;;
+  comment)
+    [[ $* == *"--body-file -"* && -n ${FAKE_GH_LOG:-} ]] && printf 'stdin: %s\n' "$(cat)" >>"$FAKE_GH_LOG"
+    exit 0
+    ;;
+  merge) exit 0 ;;
+  *) exit 1 ;;
+  esac
+  exit 0
+fi
 [[ ${1:-} == api ]] || exit 1
 shift
 
@@ -21,6 +40,11 @@ if [[ ${1:-} == --method ]]; then
 fi
 
 url="${1:-}"
+
+if [[ $url == repos/*/* && $url != */notifications* ]]; then
+  echo '{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": true}'
+  exit 0
+fi
 
 if [[ $url == user ]]; then
   echo "testuser"
