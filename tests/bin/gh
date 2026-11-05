@@ -6,21 +6,80 @@
 #                           exactly like the real gh does on HTTP errors
 #   FAKE_GH_PATCH_FAIL   -> see the --mark-read branch below
 [[ -n ${FAKE_GH_LOG:-} ]] && printf '%s\n' "$*" >>"$FAKE_GH_LOG"
+# FAKE_GH_HANG=1 -> exit as timeout(1) does when it stops a hung call
+[[ ${FAKE_GH_HANG:-0} == 1 ]] && exit 124
 
 if [[ ${1:-} == auth ]]; then
   exit "${FAKE_GH_AUTH_FAIL:-0}"
+fi
+
+# preview.sh side entrance: pr/issue view, comment, merge.
+#   FAKE_GH_PREVIEW_FAIL=1 -> view prints an error and exits 1
+if [[ ${1:-} == pr || ${1:-} == issue ]]; then
+  kind=$1 verb=${2:-}
+  case $verb in
+  view)
+    if [[ ${FAKE_GH_PREVIEW_FAIL:-0} == 1 ]]; then echo "GraphQL: Could not resolve" >&2; exit 1; fi
+    cat "${FAKE_GH_FIXTURES:?}/$kind-view.json"
+    ;;
+  comment)
+    #   FAKE_GH_COMMENT_FAIL=1 -> a 140KB one-line error on stderr, exit 1
+    if [[ ${FAKE_GH_COMMENT_FAIL:-0} == 1 ]]; then cat >/dev/null; head -c 140000 /dev/zero | tr '\0' e >&2; exit 1; fi
+    if [[ $* == *"--body-file "* && -n ${FAKE_GH_LOG:-} ]]; then
+      file=-
+      prev=""
+      for arg in "$@"; do [[ $prev == --body-file ]] && file=$arg; prev=$arg; done
+      if [[ $file == - ]]; then body=$(cat; printf x); else body=$(cat -- "$file"; printf x); fi
+      printf 'stdin: %s\nstdin-bytes: %s\n' "${body%x}" "$(( $(printf '%s' "${body%x}" | wc -c) ))" >>"$FAKE_GH_LOG"
+    fi
+    exit 0
+    ;;
+  merge | ready) exit 0 ;;
+  *) exit 1 ;;
+  esac
+  exit 0
 fi
 [[ ${1:-} == api ]] || exit 1
 shift
 
 # --mark-read side entrance: gh api --method PATCH notifications/threads/<id>
 #   FAKE_GH_PATCH_FAIL=<id> -> that thread's PATCH fails
+#   FAKE_GH_MERGE_QUEUE=1 -> the merge endpoint refuses, as for a queued base
 if [[ ${1:-} == --method ]]; then
+  if [[ ${2:-} == PUT && ${3:-} == repos/*/pulls/*/merge ]]; then
+    if [[ ${FAKE_GH_MERGE_QUEUE:-0} == 1 ]]; then
+      echo '{"message":"Changes must be made through the merge queue","status":"405"}'
+      echo "gh: Changes must be made through the merge queue (HTTP 405)" >&2
+      exit 1
+    fi
+    echo '{"sha":"def456","merged":true,"message":"Pull Request successfully merged"}'
+    exit 0
+  fi
   [[ ${3:-} == "notifications/threads/${FAKE_GH_PATCH_FAIL:-none}" ]] && exit 1
   exit 0
 fi
 
 url="${1:-}"
+
+# preview.sh's single GraphQL query.
+if [[ $url == graphql ]]; then
+  #   FAKE_GH_PREVIEW_ERR=<text> -> that text on stderr, exit 1
+  if [[ -n ${FAKE_GH_PREVIEW_ERR:-} ]]; then printf '%s\n' "$FAKE_GH_PREVIEW_ERR" >&2; exit 1; fi
+  if [[ ${FAKE_GH_PREVIEW_FAIL:-0} == 1 ]]; then echo '{"errors":[{"message":"Could not resolve"}]}'; exit 1; fi
+  cat "${FAKE_GH_FIXTURES:?}/graphql.json"
+  exit 0
+fi
+
+# Repo metadata, honoring --jq like the real gh.
+#   FAKE_GH_BIG_REPO=1 -> pad it past the kernel's 128KB per-argument limit
+if [[ $url == repos/*/* && $url != */notifications* ]]; then
+  meta='{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": true}'
+  # printf is a builtin, so the padding never becomes an argument.
+  [[ ${FAKE_GH_BIG_REPO:-0} == 1 ]] && meta=$(printf '{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": true, "description": "%s"}' "$(head -c 140000 /dev/zero | tr '\0' x)")
+  shift
+  if [[ ${1:-} == --jq ]]; then jq -c "$2" <<<"$meta"; else printf '%s\n' "$meta"; fi
+  exit 0
+fi
 
 if [[ $url == user ]]; then
   echo "testuser"

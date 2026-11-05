@@ -20,6 +20,7 @@ Panel {
 
   readonly property string scriptPath: Qt.resolvedUrl("fetch.sh").toString().replace(/^file:\/\//, "")
   readonly property string notifyPath: Qt.resolvedUrl("notify.sh").toString().replace(/^file:\/\//, "")
+  readonly property string previewPath: Qt.resolvedUrl("preview.sh").toString().replace(/^file:\/\//, "")
 
   // Never name this `data`: that shadows Item's default property and steals
   // every declared child from the scene.
@@ -367,11 +368,17 @@ Panel {
   property bool keysOpen: false
   // Bumped when the pointer rests on a row, so the row that was open folds.
   property int pointerRestSerial: 0
+  property bool pointerFollowPending: false
+  onPointerRestSerialChanged: if (pointerFollowPending) {
+    pointerFollowPending = false
+    syncPreviewToCursor()
+  }
   signal lingerOpenRow()
   // The legend borrows the list's scroll, so give it back on every way out.
   property real keysScrollY: 0
   onKeysOpenChanged: {
     if (!panelFlick) return
+    if (keysOpen && previewOpen) closePreview()
     if (keysOpen) { keysScrollY = panelFlick.contentY; panelFlick.contentY = 0; keyCatcher.forceActiveFocus() }
     else Qt.callLater(function() { panelFlick.contentY = keysScrollY })
   }
@@ -451,6 +458,7 @@ Panel {
   property real inboxScrollY: 0
 
   function openSettings(fromKeyboard) {
+    if (previewOpen) closePreview()
     // Over the legend the list's own position is the one the legend saved.
     if (!settingsOpen && panelFlick) inboxScrollY = keysOpen ? keysScrollY : panelFlick.contentY
     keysOpen = false
@@ -507,6 +515,533 @@ Panel {
     }
   }
 
+  // ------------------------------------------------ preview
+  //
+  // `p` opens a pane beside the list for the PR or issue under the cursor,
+  // and it follows the cursor. From there: open, comment, merge. Comment and
+  // merge post to GitHub as the user, so each is an explicit second step,
+  // and a merge is pinned to the head commit the pane showed.
+  property bool previewOpen: false
+  property string previewUrl: ""
+  property var previewData: null
+  // What the row already knows, shown the instant the pane opens.
+  property var previewStub: null
+  property string previewError: ""
+  property bool previewLoading: false
+  property var previewCache: Inbox.dict()
+  property string previewMode: ""          // "", "comment" or "merge"
+  property string previewNotice: ""
+  property bool previewNoticeError: false
+  property bool actionBusy: false
+  property string mergeMethod: ""
+  property bool commentFocused: false
+
+  // The panel is kept on screen, so with the chip on the right half of the
+  // bar it grows to the left. The pane goes on that side so the list stays
+  // still while the panel widens. Read when the pane opens, not live.
+  property bool paneOnLeft: true
+  // The list's closed width (the panel's closed content width less the
+  // panel's own padding), kept in both states, so it never re-wraps while
+  // the panel widens or shrinks.
+  readonly property real listWidth: closedContentWidth - (panel.contentWidth - keyCatcher.width)
+
+  // Both columns need about 852 units. On a screen too narrow for that the
+  // pane takes the panel on its own, and p or Esc goes back to the list.
+  // Decided when the pane opens, from the room beside the closed card: the
+  // pane goes on the chip's side if it fits there, the other side if it
+  // fits there, and alone in the panel otherwise. That way widening never
+  // pushes the list, even when the screen edge clamps the card.
+  property bool paneFits: true
+  readonly property bool paneSolo: previewOpen && !paneFits
+
+  function pickPaneSide() {
+    var w = panel.screenW
+    if (w <= 0) { paneOnLeft = true; paneFits = true; return }
+    var need = Style.space(452)
+    var leftRoom = panel.cardOrigin.x - panel.margin
+    var rightRoom = w - panel.margin - (panel.cardOrigin.x + panel.contentWidth)
+    var preferLeft = panel.anchorScreenPos.x + panel.anchorW / 2 > w / 2
+    if (preferLeft ? leftRoom >= need : rightRoom >= need) { paneOnLeft = preferLeft; paneFits = true }
+    else if (preferLeft ? rightRoom >= need : leftRoom >= need) { paneOnLeft = !preferLeft; paneFits = true }
+    else { paneOnLeft = preferLeft; paneFits = false }
+  }
+  signal commentPosted(string url)
+  // A reload that must start fresh: an answer already in flight began
+  // before the action and is discarded, so wait for it and ask again.
+  property bool reloadPending: false
+
+  function focusList() { keyCatcher.forceActiveFocus() }
+
+  function previewableUrl(url) {
+    return /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/(pull|issues)\/[0-9]+$/.test(String(url || ""))
+  }
+
+  readonly property string cursorUrl: {
+    var row = rowAt(cursor)
+    return row && row.item && previewableUrl(row.item.url) ? String(row.item.url) : ""
+  }
+
+  // Back from comment or merge: catch up with the cursor if it moved.
+  // After a finished comment or merge the pane stays on its item, notice
+  // and all, until the user moves; only a cancel catches up at once.
+  property bool holdAfterAction: false
+  // Keys and real pointer motion call this before moving the cursor. A
+  // cursor change without it (a refresh removed the merged PR, say) keeps
+  // the finished action's item and notice on screen.
+  function releaseHold(cause) {
+    if (!holdAfterAction || !Inbox.releasesHold(cause)) return
+    holdAfterAction = false
+    // The cursor may not change (pointer motion within the row, Up on the
+    // first row), so bring the pane to it explicitly; with the pointer, once
+    // it rests, like any other pointer follow.
+    if (cause === "pointer") pointerFollowPending = true
+    else Qt.callLater(syncPreviewToCursor)
+  }
+
+  // Every place following resumes goes through Inbox.followDecision.
+  function syncPreviewToCursor() {
+    var act = Inbox.followDecision({ open: previewOpen, mode: previewMode, busy: actionBusy,
+      hold: holdAfterAction, cursorUrl: cursorUrl, previewUrl: previewUrl })
+    if (act === "clear") {
+      previewDebounce.stop()
+      previewUrl = ""
+      previewData = null
+      previewStub = null
+      previewError = ""
+      previewLoading = false
+    } else if (act === "show") {
+      showPreview(cursorUrl, true)
+    }
+  }
+  onPreviewModeChanged: {
+    if (previewMode !== "" || !previewOpen || actionBusy) return
+    if (holdAfterAction) return
+    syncPreviewToCursor()
+  }
+
+  function previewFirst(nth) {
+    var seen = 0
+    for (var r = 0; r < rowCount; r++) {
+      var at = rowAt(r)
+      if (at && at.item && previewableUrl(at.item.url) && ++seen >= (nth || 1)) {
+        cursorFromKeyboard = true
+        cursorActive = true
+        cursor = r
+        openPreview()
+        return
+      }
+    }
+  }
+
+  function togglePreview() {
+    if (actionBusy) return
+    if (previewOpen) closePreview()
+    else openPreview()
+  }
+
+  // While a comment or merge runs nothing replaces or closes the pane, by
+  // key or by mouse, so its result always lands on its own item.
+  function openPreview() {
+    if (cursorUrl === "" || actionBusy) return
+    if (!previewOpen) pickPaneSide()
+    previewOpen = true
+    showPreview(cursorUrl)
+  }
+
+  function closePreview() {
+    if (actionBusy) return
+    holdAfterAction = false
+    previewOpen = false
+    previewMode = ""
+    keyCatcher.forceActiveFocus()
+  }
+
+  // A cached preview shows at once. Otherwise following the cursor waits a
+  // moment, so j/k through a list does not fire one gh call per row. With
+  // the pane closed, a row the cursor rests on is fetched in the background,
+  // so `p` usually opens on a cache hit.
+  onCursorUrlChanged: {
+    if (!opened) return
+    // Only a deliberate move releases a held result (see releaseHold). The
+    // pane switches at once, so c and m only ever act on what is shown, and
+    // only the fetch waits for the cursor to settle; a row with nothing to
+    // preview empties it, so Enter cannot open the previous PR.
+    if (holdAfterAction) return
+    // The pointer crossing rows on its way to the pane's buttons must not
+    // swap the preview: it follows once the pointer rests on a row (the
+    // row's 350 ms rest), keys follow at once.
+    if (previewOpen && !cursorFromKeyboard) { pointerFollowPending = true; return }
+    if (previewOpen) syncPreviewToCursor()
+    else prefetchTimer.restart()
+  }
+  Timer {
+    id: previewDebounce
+    interval: 120
+    onTriggered: if (root.previewMode === "" && !root.actionBusy && root.previewLoading) {
+      root.loadPreview()
+      root.prefetchNeighbors()
+    }
+  }
+  Timer {
+    id: prefetchTimer
+    interval: 400
+    onTriggered: if (!root.previewOpen) root.prefetch(root.cursorUrl)
+  }
+
+  function cachedPreview(url, maxAge) {
+    var hit = Inbox.has(previewCache, url) ? previewCache[url] : null
+    return hit && Date.now() - hit.at < maxAge ? hit : null
+  }
+
+  function stubFor(url) {
+    var row = rowAt(cursor)
+    var it = row && row.item && String(row.item.url) === url ? row.item : null
+    if (!it) return null
+    // Empty lists, so a binding read mid-switch between previews finds them.
+    return { kind: /\/pull\//.test(url) ? "pr" : "issue", url: url, title: String(it.title || ""), stub: true,
+      labels: [], comments: [], commentTotal: 0, mergeMethods: [], reviews: [], requested: [],
+      checks: { passed: 0, failed: 0, pending: 0, total: 0, state: "" } }
+  }
+
+  // Up to five minutes old shows at once. Older than a minute it is
+  // refreshed in the background and replaced when the answer lands.
+  property bool previewStale: false
+  property int unknownRetries: 0
+  Timer {
+    id: unknownRetryTimer
+    interval: 3000
+    onTriggered: if (root.previewOpen && root.previewMode === "") root.reloadPreview()
+  }
+
+  // Ask GitHub again for the item on screen, ignoring the cache.
+  function reloadPreview() {
+    if (previewUrl === "" || actionBusy) return
+    var next = Inbox.copy(previewCache)
+    delete next[previewUrl]
+    previewCache = next
+    previewLoading = true
+    loadPreview()
+  }
+
+  function showPreview(url, deferFetch) {
+    if (actionBusy) return
+    if (url !== previewUrl) unknownRetries = 0
+    previewStale = false
+    previewUrl = url
+    previewNotice = ""
+    previewMode = ""
+    previewStub = stubFor(url)
+    previewError = ""
+    var hit = cachedPreview(url, 300000)
+    previewData = hit ? hit.data : null
+    previewLoading = !hit || Date.now() - hit.at > 60000
+    if (previewLoading && deferFetch === true) { previewDebounce.restart(); return }
+    if (previewLoading) loadPreview()
+    prefetchNeighbors()
+  }
+
+  function prefetchNeighbors() {
+    for (var delta = -1; delta <= 1; delta += 2) {
+      var row = rowAt(cursor + delta)
+      if (row && row.item) prefetch(String(row.item.url))
+    }
+  }
+
+  // Background fetches, at most three waiting, one running, and never ahead
+  // of the visible pane's own fetch.
+  property var prefetchQueue: []
+
+  // A URL that just failed waits a minute, and background fetches start at
+  // most every 800 ms, so a failing row cannot be hammered by j/k.
+  property var failedAt: Inbox.dict()
+  property double lastPrefetchAt: 0
+
+  function prefetch(url) {
+    if (!previewableUrl(url) || cachedPreview(url, 60000)) return
+    if (Inbox.has(failedAt, url) && Date.now() - failedAt[url] < 60000) return
+    if ((prefetchProcess.running && prefetchProcess.requested === url) || prefetchQueue.indexOf(url) >= 0) return
+    if (previewProcess.running && previewProcess.requested === url) return
+    prefetchQueue = prefetchQueue.concat([url]).slice(-3)
+    runPrefetch()
+  }
+
+  function runPrefetch() {
+    if (prefetchProcess.running || previewProcess.running || prefetchQueue.length === 0) return
+    var wait = 800 - (Date.now() - lastPrefetchAt)
+    if (wait > 0) { prefetchCadence.interval = wait; prefetchCadence.restart(); return }
+    lastPrefetchAt = Date.now()
+    var url = prefetchQueue[0]
+    prefetchQueue = prefetchQueue.slice(1)
+    var failedRecently = Inbox.has(failedAt, url) && Date.now() - failedAt[url] < 60000
+    if (cachedPreview(url, 60000) || failedRecently) { Qt.callLater(runPrefetch); return }
+    prefetchProcess.requested = url
+    prefetchProcess.startedAt = Date.now()
+    prefetchProcess.command = ["bash", previewPath, "view", url]
+    prefetchProcess.running = true
+  }
+
+  Timer {
+    id: prefetchCadence
+    onTriggered: root.runPrefetch()
+  }
+
+  Process {
+    id: prefetchProcess
+    property string requested: ""
+    property double startedAt: 0
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPreview(text, prefetchProcess.requested, prefetchProcess.startedAt)
+    }
+    onRunningChanged: if (!running) {
+      if (root.reloadPending) Qt.callLater(root.loadPreview)
+      Qt.callLater(root.runPrefetch)
+    }
+  }
+
+  // One visible fetch at a time, beside at most one background fetch. A
+  // cursor that moved on while it ran gets its own call as soon as this one
+  // ends, and the stale answer only fills the cache. A background fetch
+  // already running for this URL is simply awaited.
+  function loadPreview() {
+    if (previewUrl === "") return
+    if (!reloadPending && prefetchProcess.running && prefetchProcess.requested === previewUrl) return
+    if (previewProcess.running) return
+    if (reloadPending && prefetchProcess.running && prefetchProcess.requested === previewUrl) return
+    reloadPending = false
+    previewProcess.requested = previewUrl
+    previewProcess.startedAt = Date.now()
+    previewProcess.command = ["bash", previewPath, "view", previewUrl]
+    previewProcess.running = true
+  }
+
+  function applyPreview(text, url, startedAt) {
+    if (Inbox.has(invalidatedAt, url) && startedAt < invalidatedAt[url]) return
+    var parsed = null
+    if (String(text || "").length <= 1048576) {
+      try { parsed = JSON.parse(text) } catch (e) { parsed = null }
+    }
+    if (!parsed || typeof parsed !== "object") parsed = { error: "Unreadable preview data" }
+    var ok = String(parsed.error || "") === "" && parsed.url === url
+    if (!ok) {
+      var failed = Inbox.copy(failedAt)
+      failed[url] = Date.now()
+      failedAt = failed
+    }
+    if (ok) {
+      var next = Object.keys(previewCache).length > 50 ? Inbox.dict() : Inbox.copy(previewCache)
+      next[url] = { data: parsed, at: Date.now() }
+      previewCache = next
+    }
+    if (url !== previewUrl) return
+    previewLoading = false
+    // A failed refresh keeps the older preview on screen, marked as such.
+    if (!ok && previewData && previewData.url === url) {
+      previewStale = true
+      previewError = String(parsed.error || "unreadable data")
+      return
+    }
+    previewStale = false
+    // GitHub computes mergeability lazily: ask again a few times.
+    if (ok && parsed.kind === "pr" && parsed.mergeable === "UNKNOWN" && unknownRetries < 3) {
+      unknownRetries++
+      unknownRetryTimer.restart()
+    }
+    previewError = ok ? "" : String(parsed.error || "Unreadable preview data")
+    previewData = ok ? parsed : null
+  }
+
+  Process {
+    id: previewProcess
+    property string requested: ""
+    property double startedAt: 0
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPreview(text, previewProcess.requested, previewProcess.startedAt)
+    }
+    onRunningChanged: if (!running) {
+      if (root.reloadPending || (root.previewLoading && root.previewUrl !== requested)) Qt.callLater(root.loadPreview)
+      Qt.callLater(root.runPrefetch)
+    }
+  }
+
+  // Why the merge button cannot merge, or "" when it can.
+  readonly property string mergeBlock: {
+    var d = previewData
+    if (!d || d.kind !== "pr") return "Only pull requests merge"
+    if (d.state === "MERGED") return "Already merged"
+    if (d.state === "CLOSED") return "Closed"
+    if (d.state === "DRAFT") return "Draft"
+    if (d.canMerge === false) return "You do not have permission to merge here"
+    if (d.mergeable === "CONFLICTING") return "Has conflicts with " + d.base
+    if (d.mergeable !== "MERGEABLE") return "GitHub is still checking mergeability"
+    if (d.mergeState === "BLOCKED") return "Blocked by required reviews or checks"
+    if (d.mergeState === "BEHIND") return "Behind " + d.base + ": update the branch first"
+    if (!d.mergeMethods || d.mergeMethods.length === 0) return "Merging is turned off for this repo"
+    if (!d.headSha) return "Head commit unknown"
+    return ""
+  }
+
+  function startComment() {
+    if (!previewOpen) return
+    if (previewMode === "comment") { previewPane.focusComment(); return }
+    if (!previewData || actionBusy) return
+    previewDebounce.stop()
+    previewNotice = ""
+    previewMode = "comment"
+  }
+
+  // The merge strip freezes what it asks about: URL, number, base and the
+  // head commit shown. A refresh landing meanwhile cannot change the target.
+  property var mergeTarget: null
+
+  // `m` moves a PR forward: on a draft that means ready for review (the
+  // same second step as a merge), otherwise merge.
+  readonly property bool canMarkReady: !!previewData && previewData.kind === "pr" && previewData.state === "DRAFT"
+    && (previewData.canMerge === true || String(previewData.author) === String(feed.user || ""))
+
+  function startMerge() {
+    if (!previewOpen || !previewData || actionBusy || previewMode !== "") return
+    if (previewData.kind === "pr" && previewData.state === "DRAFT") {
+      if (!canMarkReady) { notice("Only the author or someone with write access can mark it ready", false, true); return }
+      previewDebounce.stop()
+      mergeTarget = { url: previewUrl, number: previewData.number }
+      previewNotice = ""
+      previewMode = "ready"
+      return
+    }
+    if (mergeBlock !== "") { notice(mergeBlock, false, true); return }
+    previewDebounce.stop()
+    mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
+    mergeMethod = previewData.mergeMethods[0]
+    previewNotice = ""
+    previewMode = "merge"
+  }
+
+  function cycleMergeMethod(delta) {
+    if (actionBusy) return
+    var methods = previewData && previewData.mergeMethods ? previewData.mergeMethods : []
+    if (methods.length < 2) return
+    var i = methods.indexOf(mergeMethod)
+    mergeMethod = methods[((i + delta) % methods.length + methods.length) % methods.length]
+  }
+
+  // Three tones: errors red, results ("Merged") plain, reasons dim.
+  property bool previewNoticeDim: false
+  function notice(text, isError, isDim) {
+    previewNotice = text
+    previewNoticeError = isError === true
+    previewNoticeDim = isDim === true
+  }
+
+  function sendComment(text) {
+    if (!previewOpen || previewMode !== "comment") return
+    if (actionBusy || String(text || "").trim() === "" || previewUrl === "") return
+    actionBusy = true
+    actionProcess.kind = "comment"
+    actionProcess.target = previewUrl
+    actionProcess.payload = String(text)
+    actionProcess.stdinEnabled = true
+    actionProcess.command = ["bash", previewPath, "comment", previewUrl]
+    actionProcess.running = true
+  }
+
+  function confirmReady() {
+    if (actionBusy || previewMode !== "ready" || !mergeTarget || mergeTarget.url !== previewUrl) return
+    actionBusy = true
+    actionProcess.kind = "ready"
+    actionProcess.target = mergeTarget.url
+    actionProcess.payload = ""
+    actionProcess.stdinEnabled = false
+    actionProcess.command = ["bash", previewPath, "ready", mergeTarget.url]
+    actionProcess.running = true
+  }
+
+  // A fresh Enter (the Shortcut rejects repeats) or the button: `m` and
+  // Space never confirm, so a held key cannot open and confirm in one go.
+  function confirmMerge() {
+    if (actionBusy || previewMode !== "merge" || !mergeTarget) return
+    if (previewData && String(previewData.headSha) !== mergeTarget.sha) {
+      previewMode = ""
+      notice("New commits arrived since you opened this. Review them, then press m again.", true)
+      return
+    }
+    if (previewData && String(previewData.base) !== mergeTarget.base) {
+      previewMode = ""
+      notice("This PR now targets " + previewData.base + ". Review it, then press m again.", true)
+      return
+    }
+    actionBusy = true
+    actionProcess.kind = "merge"
+    actionProcess.target = mergeTarget.url
+    actionProcess.payload = ""
+    actionProcess.stdinEnabled = false
+    actionProcess.command = ["bash", previewPath, "merge", mergeTarget.url, mergeMethod, mergeTarget.sha, mergeTarget.base]
+    actionProcess.running = true
+  }
+
+  // The pane cannot move on while an action runs (see onCursorUrlChanged
+  // and the Esc handling), so its result always lands on its own item.
+  property bool actionUnseen: false
+
+  function actionFinished(text) {
+    actionBusy = false
+    if (!opened) actionUnseen = true
+    var parsed = null
+    try { parsed = JSON.parse(text) } catch (e) { parsed = null }
+    var kind = actionProcess.kind
+    if (!parsed || parsed.ok !== true) {
+      notice(parsed && parsed.error ? String(parsed.error) : "GitHub did not answer", true)
+      // A merge or ready that failed or timed out may still have happened:
+      // show what GitHub says now.
+      if (kind !== "comment" && previewUrl === actionProcess.target) reloadPreview()
+      // A failed post keeps its draft: give the box the keys back.
+      if (previewMode === "comment") Qt.callLater(function() { previewPane.focusComment() })
+      return
+    }
+    if (kind === "comment") commentPosted(actionProcess.target)
+    holdAfterAction = true
+    previewMode = ""
+    if (previewUrl === actionProcess.target)
+      notice(kind === "merge" ? "Merged" : (kind === "ready" ? "Marked ready for review" : "Comment posted"), false)
+    // Show what GitHub now says, and let the list catch up with a merge.
+    // Any answer to a request started before now is out of date.
+    var stale = Inbox.copy(invalidatedAt)
+    stale[actionProcess.target] = Date.now()
+    invalidatedAt = stale
+    var next = Inbox.copy(previewCache)
+    delete next[actionProcess.target]
+    previewCache = next
+    if (previewUrl === actionProcess.target) {
+      previewLoading = true
+      reloadPending = true
+      loadPreview()
+    }
+    if (kind === "merge" || kind === "ready") refreshNow()
+  }
+
+  property var invalidatedAt: Inbox.dict()
+
+  // Comment text goes in on stdin, never argv, which any local user can read.
+  Process {
+    id: actionProcess
+    property string kind: ""
+    property string target: ""
+    property string payload: ""
+    running: false
+    onStarted: {
+      if (kind === "comment") write(payload)
+      payload = ""
+      stdinEnabled = false
+    }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.actionFinished(text)
+    }
+  }
+
   // The line under the list: what the keys do for the row under the cursor.
   function hintText() {
     if (lastUndo) {
@@ -517,6 +1052,14 @@ Panel {
                        : " · u or click to undo (" + left + "s)")
     }
     if (keysOpen) return "? or Esc back"
+    if (actionBusy) return actionProcess.kind === "merge" ? "Merging…" : (actionProcess.kind === "ready" ? "Marking it ready…" : "Posting the comment…")
+    if (previewOpen && previewMode === "ready") return "↵ mark ready for review · Esc cancel"
+    if (previewOpen && previewMode === "merge")
+      return "↵ confirm merge" + (previewData && previewData.mergeMethods && previewData.mergeMethods.length > 1 ? " · h/l method" : "") + " · Esc cancel"
+    if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
+    if (previewOpen) return "j/k next item · J/K scroll · ↵ open · c comment"
+      + (canMarkReady ? " · m ready for review" : (previewData && previewData.kind === "pr" && mergeBlock === "" ? " · m merge" : ""))
+      + (paneSolo ? " · p back to the list" : " · p close") + " · ? keys"
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
       if (!srow) return "space toggle · j/k move · s or Esc back"
@@ -525,8 +1068,9 @@ Panel {
         + " · s back"
     }
     var row = cursorActive ? rowAt(cursor) : null
-    if (row && row.notification) return "↵ open · d dismiss · D dismiss all · ? keys"
+    if (row && row.notification) return "↵ open · d dismiss · " + (previewableUrl(row.item.url) ? "p preview" : "D dismiss all") + " · ? keys"
     if (row && row.mention && mentionUnread(row.item)) return "↵ open · d mark seen · ? keys"
+    if (row && previewableUrl(row.item.url)) return "↵ open · p preview · / find · ? keys"
     return "j/k move · ↵ open · / find · s settings · ? keys"
   }
 
@@ -670,7 +1214,17 @@ Panel {
   }
 
   function moveCursor(delta) {
+    releaseHold("key")
     if (rowCount === 0) return
+    // The pointer moved the cursor without the pane following yet: j/k step
+    // from the item the pane shows, not from the row the pointer crossed.
+    if (pointerFollowPending && previewOpen && previewUrl !== "") {
+      pointerFollowPending = false
+      for (var r = 0; r < rowCount; r++) {
+        var at = rowAt(r)
+        if (at && at.item && String(at.item.url) === previewUrl) { cursor = r; break }
+      }
+    }
     hoverGate.reset()
     cursorFromKeyboard = true
     cursorActive = true
@@ -689,6 +1243,7 @@ Panel {
   }
 
   function jumpSection(direction) {
+    releaseHold("jump")
     var starts = sectionStarts()
     if (starts.length === 0) return
     hoverGate.reset()
@@ -715,19 +1270,40 @@ Panel {
 
   function ensureVisible(rowItem) {
     if (!panelFlick || !rowItem) return
+    // While the panel's height is still animating open the view can be
+    // shorter than the row; scrolling then would push the header away.
+    if (panelFlick.height < rowItem.height + Style.space(44)) return
     var y = rowItem.mapToItem(panelFlick.contentItem, 0, 0).y
     // Top padding keeps the section header in view.
     var padTop = Style.space(36)
     var padBottom = Style.space(8)
-    if (y - padTop < panelFlick.contentY)
+    // A scroll still running stops only when this one takes over.
+    if (y - padTop < panelFlick.contentY) {
+      listWheel.stop()
       panelFlick.contentY = Math.max(0, y - padTop)
-    else if (y + rowItem.height + padBottom > panelFlick.contentY + panelFlick.height)
+    } else if (y + rowItem.height + padBottom > panelFlick.contentY + panelFlick.height) {
+      listWheel.stop()
       panelFlick.contentY = Math.min(Math.max(0, panelFlick.contentHeight - panelFlick.height),
                                      y + rowItem.height + padBottom - panelFlick.height)
+    }
   }
 
   // Find lives in the inbox, so it leaves settings and scrolls to the field.
+  function scrollPreview(direction) { previewPane.scrollBy(direction) }
+
+  // Open from the pane does what opening the row does (a notification is
+  // dismissed, a mention marked seen) when the pane shows the cursor's row.
+  function openPreviewed() {
+    var row = rowAt(cursor)
+    if (row && row.item && String(row.item.url) === previewUrl) activateCursor()
+    else openUrl(previewUrl)
+  }
+
   function openSearch() {
+    releaseHold("search")
+    if ((previewMode === "merge" || previewMode === "ready") && !actionBusy) previewMode = ""
+    // Single-column: the search field lives in the list, so show the list.
+    if (paneSolo && !actionBusy) closePreview()
     keysOpen = false
     if (settingsOpen) closeSettings()
     Qt.callLater(function() { if (panelFlick) panelFlick.contentY = 0 })
@@ -752,6 +1328,7 @@ Panel {
   }
 
   function selectOrg(index) {
+    releaseHold("org")
     var count = orgs.length + 1
     var wrapped = ((index % count) + count) % count
     selectedOrg = wrapped === 0 ? "" : orgs[wrapped - 1]
@@ -784,8 +1361,14 @@ Panel {
     root.close()
   }
 
+  // A refresh asked for while one runs (a merge just landed) runs after it,
+  // so the list never keeps showing what the pane says is merged.
+  property bool refreshQueued: false
+
   function refreshNow() {
-    if (!fetchProcess.running) fetchProcess.running = true
+    if (fetchProcess.running) refreshQueued = true
+    else fetchProcess.running = true
+    if (previewOpen && previewMode === "") reloadPreview()
   }
 
   function applyFetch(text) {
@@ -861,6 +1444,16 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
+    // A comment or merge still running, or finished while the panel was
+    // closed, keeps its pane so its outcome is seen.
+    var keepPane = previewOpen && (actionBusy || actionUnseen)
+    // The cursor reset below must not empty the pane being kept.
+    if (keepPane && !actionBusy) holdAfterAction = true
+    actionUnseen = false
+    if (!keepPane) {
+      previewOpen = false
+      previewMode = ""
+    }
     sessionOrgs = Inbox.dict()
     cursorActive = false
     cursor = -1
@@ -876,7 +1469,11 @@ Panel {
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
     refreshNow()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    // One focus choice: a restored comment box, otherwise the list.
+    Qt.callLater(function() {
+      if (root.previewOpen && root.previewMode === "comment" && !root.actionBusy) previewPane.focusComment()
+      else keyCatcher.forceActiveFocus()
+    })
   }
 
   // Filters synthetic hover churn while keyboard scrolling moves rows under
@@ -938,6 +1535,10 @@ Panel {
   Process {
     id: fetchProcess
     running: false
+    onRunningChanged: if (!running && root.refreshQueued) {
+      root.refreshQueued = false
+      Qt.callLater(root.refreshNow)
+    }
     command: ["bash", root.scriptPath,
       "--mentions", String(Math.max(1, Number(root.setting("mentionLimit", 30)))),
       "--closed-days", String(Math.max(1, Number(root.setting("closedDays", 30))))]
@@ -1032,6 +1633,20 @@ Panel {
       root.routedInstance().toggleFocusMode()
       return root.routedInstance().focusMode ? "on" : "off"
     }
+    // Open the panel straight into the preview of the nth PR or issue
+    // (1 when n is empty), for a keybinding.
+    function preview(n: string): string {
+      var target = root.routedInstance()
+      target.open()
+      var index = Math.max(1, parseInt(n, 10) || 1)
+      Qt.callLater(function() { target.previewFirst(index) })
+      return "ok"
+    }
+    // Scroll the open preview by n half pages (negative goes up).
+    function scroll(n: string): string {
+      root.routedInstance().scrollPreview(Math.max(-20, Math.min(20, parseInt(n, 10) || 1)))
+      return "ok"
+    }
     function find(): string {
       var target = root.routedInstance()
       target.open()
@@ -1039,6 +1654,20 @@ Panel {
       return "ok"
     }
   }
+
+  // The shell centers the panel under its anchor, clamped to the screen.
+  // Shifting the anchor by half the extra width, away from the side the
+  // pane opens on, keeps the list's edge fixed wherever the chip sits; at
+  // a screen edge the clamp already does.
+  Item {
+    id: panelAnchor
+    parent: button
+    width: button.width
+    height: button.height
+    x: (root.paneOnLeft ? -1 : 1) * Math.max(0, panel.contentWidth - root.closedContentWidth) / 2
+  }
+
+  readonly property real closedContentWidth: panel.fittedContentWidth(Style.space(400))
 
   WidgetButton {
     id: button
@@ -1067,21 +1696,39 @@ Panel {
 
   KeyboardPanel {
     id: panel
-    anchorItem: button
+    anchorItem: panelAnchor
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight + hintBar.implicitHeight
-      + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(640))
+    focusTarget: root.previewOpen && root.previewMode === "comment" && !root.actionBusy ? previewPane.commentEditor : keyCatcher
+    // The preview pane widens the panel; the bar keeps it on screen, so it
+    // grows away from the screen edge.
+    contentWidth: panel.fittedContentWidth(Style.space(400) + (root.previewOpen && root.paneFits ? Style.space(452) : 0))
+    // While the preview is open the panel keeps one height, so j/k through
+    // short lists does not move its bottom edge; the pane scrolls inside.
+    contentHeight: root.previewOpen ? panel.fittedContentHeight(Style.space(720), Style.space(720))
+      : panel.fittedContentHeight(column.implicitHeight + hintBar.implicitHeight
+        + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(640))
+    Behavior on contentWidth { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+    Behavior on contentHeight { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: searchField.activeFocus
+      blocked: searchField.activeFocus || root.commentFocused
+      // The list's width with the pane closed, kept while it is open so
+      // the list does not change size or move as the panel widens.
 
+      // With the comment box open, every key the list catches goes back to
+      // the box and does nothing else (see textKey).
       onMoveRequested: function(dx, dy) {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        if (root.previewOpen && root.previewMode === "ready") return
+        // Choosing how to merge: left and right pick the method, nothing moves.
+        if (root.previewOpen && root.previewMode === "merge") {
+          if (dx !== 0) root.cycleMergeMethod(dx)
+          return
+        }
         // Over the legend, up and down scroll it and nothing underneath moves.
         if (root.keysOpen) {
           var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
@@ -1099,20 +1746,55 @@ Panel {
         }
         if (dy !== 0) root.moveCursor(dy)
       }
-      onActivateRequested: if (!root.keysOpen) root.settingsOpen ? root.activateSettings() : root.activateCursor()
-      onDeleteRequested: if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
+      onActivateRequested: {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        if (root.keysOpen) return
+        // Space or a repeated Enter must not merge: the strip ignores this
+        // generic signal, and a fresh Enter reaches it through the Shortcut.
+        if (root.previewOpen && (root.previewMode === "merge" || root.previewMode === "ready")) return
+        if (root.settingsOpen) root.activateSettings()
+        else if (root.previewOpen && root.previewUrl !== "") root.openPreviewed()
+        else root.activateCursor()
+      }
+      onDeleteRequested: {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
+      }
       onCloseRequested: {
-        if (root.keysOpen) root.keysOpen = false
+        // A running comment or merge keeps its strip and pane on screen.
+        if (root.actionBusy) return
+        if (root.previewOpen && root.previewMode !== "") root.previewMode = ""
+        else if (root.previewOpen) root.closePreview()
+        else if (root.keysOpen) root.keysOpen = false
         else if (root.settingsOpen) root.closeSettings()
         else if (root.query !== "" || root.searchOpen) root.closeSearch()
         else root.close()
       }
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTabRequested: function(direction) {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        root.switchPanel(direction)
+      }
       onTextKey: function(t) {
         // u, s and / still work over the legend: undo must never be blocked,
         // and the other two leave the legend for their view.
+        // While the merge strip is open only Enter confirms: a held `m`
+        // must never open and confirm in one go.
+        if (root.previewOpen && (root.previewMode === "merge" || root.previewMode === "ready")) return
+        // With the comment box open, a key that reached the list (focus lost
+        // after a failed post, say) goes back to the box and does nothing
+        // else: a word typed there must never open or confirm a merge.
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
         if (t === "?") root.keysOpen = !root.keysOpen
         else if (t === "u") root.undoDismiss()
+        else if (t === "p" && !root.settingsOpen && !root.keysOpen && !root.actionBusy) root.togglePreview()
+        else if (root.previewOpen && (t === "r" || t === "R")) root.refreshNow()
+        else if (root.previewOpen && t === "c") root.startComment()
+        else if (root.previewOpen && t === "m") root.startMerge()
+        // Ctrl+d and Ctrl+u arrive as control characters. Shift+J and Shift+K
+        // are Shortcuts next to the pane; a capital J or K that arrives as
+        // text (some input methods send no Shift) scrolls here.
+        else if (root.previewOpen && (t === "J" || t === "\u0004")) root.scrollPreview(1)
+        else if (root.previewOpen && (t === "K" || t === "\u0015")) root.scrollPreview(-1)
         else if (root.keysOpen && t !== "s" && !(t === "/" && !root.settingsOpen)) return
         else if (t === "s") {
           if (root.settingsOpen) root.closeSettings()
@@ -1128,6 +1810,54 @@ Panel {
         else if (t === "/") root.openSearch()
         else if (t === "]") root.jumpSection(1)
         else if (t === "[") root.jumpSection(-1)
+      }
+
+      // Scrolling the preview. The key catcher sees Shift+j as a plain "j"
+      // (it would move the cursor), so these are shortcuts, which Qt handles
+      // before the key reaches it. Off while a comment or a search is typed.
+      // The only key that confirms a merge: a fresh Enter, never a repeat.
+      Shortcut {
+        sequences: ["Return", "Enter"]
+        autoRepeat: false
+        enabled: root.previewOpen && (root.previewMode === "merge" || root.previewMode === "ready") && !searchField.activeFocus
+        onActivated: root.previewMode === "ready" ? root.confirmReady() : root.confirmMerge()
+      }
+      Shortcut {
+        sequences: ["Shift+J", StandardKey.MoveToNextPage]
+        enabled: root.previewOpen && !root.commentFocused && !searchField.activeFocus
+        onActivated: root.scrollPreview(1)
+      }
+      Shortcut {
+        sequences: ["Shift+K", StandardKey.MoveToPreviousPage]
+        enabled: root.previewOpen && !root.commentFocused && !searchField.activeFocus
+        onActivated: root.scrollPreview(-1)
+      }
+
+      // The room between the list and the card's outer edge. While the card
+      // grows or shrinks the pane is cut at the list's edge, never drawn on it.
+      Item {
+        x: root.paneSolo || root.paneOnLeft ? 0 : panelFlick.x + panelFlick.width + Style.space(12)
+        width: root.paneSolo ? parent.width
+          : Math.max(0, root.paneOnLeft ? panelFlick.x - Style.space(12) : parent.width - x)
+        anchors.top: parent.top
+        anchors.bottom: panelFlick.bottom
+        clip: true
+
+        PreviewPane {
+          id: previewPane
+          inbox: root
+          onLeft: root.paneOnLeft
+          // A fixed width on the outer edge, so it stays drawn while it fades
+          // and the panel grows or shrinks around it.
+          width: root.paneSolo ? parent.width : Style.space(440)
+          height: parent.height
+          solo: root.paneSolo
+          visible: opacity > 0.01
+          // Fading out after p: drawn, but nothing in it can be clicked.
+          enabled: root.previewOpen
+          opacity: root.previewOpen ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 160 } }
+        }
       }
 
       Text {
@@ -1178,8 +1908,12 @@ Panel {
 
       Flickable {
         id: panelFlick
-        anchors.left: parent.left
-        anchors.right: parent.right
+        // The list keeps its place on screen: it sits on the side the panel
+        // does not grow toward, and the pane opens on the other.
+        anchors.left: root.paneOnLeft && !root.paneSolo ? undefined : parent.left
+        anchors.right: root.paneOnLeft && !root.paneSolo ? parent.right : undefined
+        width: root.paneSolo ? parent.width : root.listWidth
+        visible: !root.paneSolo
         anchors.top: parent.top
         anchors.bottom: failureLine.visible ? failureLine.top : hintBar.top
         contentWidth: width
@@ -1189,6 +1923,8 @@ Panel {
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        SmoothWheel { id: listWheel; flick: panelFlick }
 
         Column {
           id: column
@@ -1760,6 +2496,9 @@ Panel {
         ["d  x", "Dismiss, or clear a mention dot"],
         ["D", "Dismiss every notification shown"],
         ["u", "Undo a dismissal (5 seconds)"],
+        ["p", "Preview a PR or issue beside the list"],
+        ["c  m", "In a preview: comment, merge"],
+        ["J K", "Scroll the preview (or PgDn PgUp, Ctrl+d Ctrl+u)"],
         ["/", "Fuzzy find"],
         ["f", "Focus mode on or off"],
         ["s", "Settings"],
@@ -2144,6 +2883,7 @@ Panel {
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       onPositionChanged: function(mouse) {
         if (!hoverGate.moved(rowMouse, mouse)) return
+        root.releaseHold("pointer")
         // Handing over from the keyboard: the row it opened stays open as
         // lingering, so the switch itself moves nothing.
         if (root.cursorFromKeyboard) root.lingerOpenRow()
@@ -2185,6 +2925,26 @@ Panel {
       }
 
       PanelActionButton {
+        id: previewButton
+        // Also lit on the row the pane shows, which the cursor may have left
+        // while the pointer travels toward the pane.
+        visible: !!row.item && root.previewableUrl(row.item.url)
+          && (row.hasCursor || (root.previewOpen && String(row.item.url) === root.previewUrl))
+        anchors.right: dismissButton.visible ? dismissButton.left : parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: "󰈈"
+        tooltipText: root.previewOpen && root.previewUrl === String(row.item ? row.item.url : "") ? "Close preview (p)" : "Preview (p)"
+        foreground: root.previewOpen && root.previewUrl === String(row.item ? row.item.url : "") ? root.foreground : root.dim
+        hoverColor: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: {
+          root.cursor = row.flatIndex
+          if (root.previewOpen && root.previewUrl === String(row.item.url)) root.closePreview()
+          else root.openPreview()
+        }
+      }
+
+      PanelActionButton {
         id: dismissButton
         visible: row.dismissable && row.hasCursor
         anchors.right: parent.right
@@ -2199,7 +2959,7 @@ Panel {
 
       Rectangle {
         id: unreadDot
-        visible: row.dotted && !dismissButton.visible
+        visible: row.dotted && !dismissButton.visible && !previewButton.visible
         width: Style.space(7)
         height: width
         radius: width / 2
@@ -2213,8 +2973,9 @@ Panel {
         spacing: Style.space(1)
         anchors.left: rowGlyph.right
         anchors.leftMargin: Style.space(10)
-        anchors.right: dismissButton.visible ? dismissButton.left : (unreadDot.visible ? unreadDot.left : parent.right)
-        anchors.rightMargin: dismissButton.visible || unreadDot.visible ? Style.space(8) : 0
+        anchors.right: previewButton.visible ? previewButton.left
+          : (dismissButton.visible ? dismissButton.left : (unreadDot.visible ? unreadDot.left : parent.right))
+        anchors.rightMargin: previewButton.visible || dismissButton.visible || unreadDot.visible ? Style.space(8) : 0
         anchors.verticalCenter: parent.verticalCenter
 
         Text {

@@ -171,3 +171,254 @@ function undismissed(list, dismissed) {
   }
   return out
 }
+
+// What a key in the comment box does. A held Ctrl+Enter repeats; after a
+// failed post that repeat would post again, so it is swallowed.
+function commentKey(k) {
+  if (k.escape) return "cancel"
+  if (k.enter && k.ctrl) return k.repeat ? "swallow" : "submit"
+  return ""
+}
+
+// What the open preview does when the cursor's item changes or following
+// resumes (after a cancel or a released hold): "show" the cursor's item,
+// "clear" when it has nothing to preview, "none" while held, busy, in an
+// action, or already there. Enter must never open an item the cursor is
+// not on.
+function followDecision(st) {
+  if (!st.open || st.mode !== "" || st.busy || st.hold) return "none"
+  if (st.cursorUrl === "") return st.previewUrl === "" ? "none" : "clear"
+  return st.cursorUrl === st.previewUrl ? "none" : "show"
+}
+
+// A finished action's result stays on screen until the user does
+// something deliberate that changes what the cursor means. A refresh
+// moving the cursor is not that.
+function releasesHold(cause) {
+  return ["key", "jump", "pointer", "search", "org"].indexOf(cause) >= 0
+}
+
+// Markdown shown as plain text (never rendered, so nothing in it can
+// become markup): what GitHub bodies are full of reads as words.
+// The emoji codes bots and people type most, as the emoji GitHub shows.
+var emojiCodes = {
+  white_check_mark: "✅", heavy_check_mark: "✔️", x: "❌", warning: "⚠️", rocket: "🚀",
+  tada: "🎉", bug: "🐛", bulb: "💡", memo: "📝", eyes: "👀", fire: "🔥", sparkles: "✨",
+  "+1": "👍", "-1": "👎", thumbsup: "👍", thumbsdown: "👎", heart: "❤️", pray: "🙏",
+  exclamation: "❗", question: "❓", information_source: "ℹ️", arrow_right: "→", wrench: "🔧",
+  hammer: "🔨", lock: "🔒", zap: "⚡", recycle: "♻️", broom: "🧹", construction: "🚧",
+  test_tube: "🧪", chart_with_upwards_trend: "📈", chart_with_downwards_trend: "📉",
+  small_red_triangle_down: "🔻", small_red_triangle: "🔺", heavy_minus_sign: "➖", rabbit: "🐇"
+}
+
+function cleanLine(line) {
+  return String(line)
+    // What the 400- and 1200-character cuts leave half done goes first: an
+    // unclosed tag or image disappears, an unclosed link keeps its text.
+    .replace(/!\[[^\]]*\]\([^)]*$/, "[image]")
+    .replace(/<[A-Za-z][^>]*$/, "")
+    .replace(/\[([^\]]*)\]\([^)]*$/, "$1")
+    .replace(/:([a-z0-9_+-]+):/g, function(m, code) { return Object.prototype.hasOwnProperty.call(emojiCodes, code) ? emojiCodes[code] : m })
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "[image]")
+    .replace(/<img[^>]*>/gi, "[image]")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
+    // A known list of tags, not any <...>: code such as Vec<String> stays.
+    .replace(/<\/?(details|summary|br|sub|sup|p|div|b|i|em|strong|code|kbd|a|ul|ol|li|table|thead|tbody|tr|td|th|span|h[1-6]|hr|blockquote|pre|picture|source)\b[^>]*>/gi, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/~~(.+?)~~/g, "$1")
+    .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?!\*)/g, "$1$2")
+    // A fixed set of entities, &amp; last so "&amp;lt;" stays "&lt;".
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+    // Check marks as the text glyph, not three different color emoji.
+    .replace(/\u2705|\u2714\ufe0f?|\u2611\ufe0f?/g, "\u2713")
+    // A word joiner keeps a closing bracket on its word's line: Qt would
+    // otherwise start a wrapped CJK line with it.
+    .replace(/([\u3000-\u9fff\uff00-\uffef])([>)\]\u300d\u300f\u3011\uff09])/g, "$1\u2060$2")
+    .replace(/([<(\[\u300c\u300e\u3010\uff08])([\u3000-\u9fff\uff00-\uffef])/g, "$1\u2060$2")
+}
+
+// The description as blocks for the pane: headings, paragraphs, list
+// items with their depth (so a wrapped item keeps its indent), table rows
+// as "a · b · c", and quotes. Markdown and the HTML bots write instead
+// (Dependabot's <blockquote>, <h2> and <li>) are read the same way. Code
+// fences keep their content and lose the fence. Input is cut to 4000
+// characters first: the regexes are quadratic on unclosed brackets.
+function bodyBlocks(text, maxBlocks) {
+  var max = maxBlocks || 12
+  var source = String(text || "")
+  var cut = source.length > 4000 || source.slice(-1) === "…"
+  var rawLines = source.slice(0, 4000).replace(/\r/g, "").split("\n")
+  // Comments are blanked, not removed, so line numbers still match rawLines.
+  var lines = rawLines.join("\n").replace(/<!--[\s\S]*?-->/g, function(m) { return m.replace(/[^\n]/g, "") }).split("\n")
+  var blocks = []
+  var para = []
+  var paraQuote = false
+  var htmlQuote = false
+  var inList = false
+  // The HTML quote runs from the first <blockquote> to the last
+  // </blockquote>: a nested or stray closing tag inside quoted release
+  // notes must not end it early and let quoted text pass as the author's.
+  // Two separate quotes then dim the text between them, the safe side.
+  // The scan reads the text before comments go, so a close hidden in a
+  // comment still counts; and a body cut short (its real close may be past
+  // the cut) keeps the quote to the end of what is shown.
+  var lastClose = -1
+  if (!cut) for (var c = 0; c < rawLines.length; c++) if (/<\/blockquote>/i.test(rawLines[c])) lastClose = c
+  // Every block made inside a quote is marked, so quoted release notes in
+  // a bot's PR never read as the author's words.
+  function block(heading, txt, bullet, indent, quote, urgent) {
+    var b = { heading: heading, text: txt, bullet: bullet, indent: indent }
+    if (quote) b.quote = true
+    if (urgent) b.urgent = true
+    blocks.push(b)
+  }
+  // Hard-wrapped prose (commit-style bodies at about 72 columns) joins up:
+  // a long line that does not end a sentence runs on into the next. Short
+  // lines keep their break, so deliberate line breaks survive.
+  function flush() {
+    var t = ""
+    for (var k = 0; k < para.length; k++) {
+      var prev = k > 0 ? para[k - 1] : ""
+      // Full-width punctuation ends a sentence too, and Japanese or
+      // Chinese text runs on with no space between the lines.
+      var runOn = prev.length > 60 && !/[.!?:。！？：」）)]$|  $/.test(prev)
+      var cjk = /[\u3000-\u9fff\uff00-\uffef]$/.test(prev) || /^[\u3000-\u9fff\uff00-\uffef]/.test(para[k])
+      t += k === 0 ? para[k] : (runOn ? (cjk ? "" : " ") : "\n") + para[k]
+    }
+    t = t.trim()
+    if (t !== "") block(false, t, "", 0, paraQuote || htmlQuote)
+    para = []
+  }
+  for (var i = 0; i < lines.length && blocks.length < max; i++) {
+    var raw = lines[i]
+    var li = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(raw)
+    // An indented line right under a list item continues it (hard wrap).
+    if (!li && inList && /^\s+\S/.test(raw) && blocks.length > 0) {
+      var last = blocks[blocks.length - 1]
+      last.text = (last.text + " " + cleanLine(raw).trim()).trim()
+      continue
+    }
+    inList = false
+    if (/<blockquote\b/i.test(raw)) { flush(); htmlQuote = true }
+    var closesQuote = i === lastClose
+    if (/^\s*```/.test(raw) || /^\s*([-*_]\s*){3,}$/.test(raw) || /^\s*\|[\s:|-]+\|\s*$/.test(raw)) {
+      if (closesQuote) { flush(); htmlQuote = false }
+      continue
+    }
+    var htmlHeading = /^\s*<h[1-6]\b[^>]*>(.*)<\/h[1-6]>\s*$/i.exec(raw)
+    var htmlItem = /^\s*<li\b[^>]*>(.*?)(<\/li>)?\s*$/i.exec(raw)
+    // A table row the 1200-character cut ended early has no closing pipe.
+    var alert = /^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i.exec(raw)
+    if (alert) {
+      flush()
+      var kindName = alert[1].toLowerCase()
+      block(true, kindName.charAt(0).toUpperCase() + kindName.slice(1), "", 0, true, /warning|caution/.test(kindName))
+      paraQuote = true
+    } else if (/^\s*\|/.test(raw)) {
+      flush()
+      // The row above |---| names the columns. A data row leads with its
+      // first cell, so the rows scan as records and not as one paragraph.
+      var cells = cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/)
+      block(false, cells.join(" · "), "", 0, htmlQuote)
+      var row = blocks[blocks.length - 1]
+      if (i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) row.columns = true
+      else if (cells.length > 1) { row.text = cells.slice(1).join(" · "); row.label = cells[0] }
+    } else if (/^#{1,6}\s+/.test(raw) || htmlHeading) {
+      flush()
+      block(true, cleanLine(htmlHeading ? htmlHeading[1] : raw.replace(/^#{1,6}\s+/, "")).trim(), "", 0, htmlQuote)
+    } else if (li || htmlItem) {
+      flush()
+      inList = !!li
+      if (htmlItem) {
+        block(false, cleanLine(htmlItem[1]).trim(), "•", 0, htmlQuote)
+      } else {
+        var indent = Math.min(4, Math.floor(li[1].length / 2))
+        var box = /^\[( |x|X)\]\s+(.*)$/.exec(li[3])
+        if (box) block(false, cleanLine(box[2]).trim(), box[1] === " " ? "[ ]" : "[x]", indent, htmlQuote)
+        else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent, htmlQuote)
+      }
+    } else {
+      var quoted = /^\s*>/.test(raw)
+      var line = cleanLine(raw.replace(/^\s*>\s?/, ""))
+      // A blank line ends a paragraph; a line that only held tags does not.
+      if (raw.trim() === "") flush()
+      else if (line.trim() !== "") {
+        if (quoted !== paraQuote) { flush(); paraQuote = quoted }
+        para.push(line)
+      }
+    }
+    if (closesQuote) { flush(); htmlQuote = false }
+  }
+  flush()
+  return blocks.slice(0, max)
+}
+
+// A comment as plain text: quoted lines (the reply's context) go.
+function plainText(text) {
+  return String(text || "").slice(0, 2000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "")
+    .split("\n").filter(function(l) { return !/^\s*>/.test(l) && !/^\s*```/.test(l) })
+    .map(function(l) { return cleanLine(l.replace(/^#{1,6}\s+/, "").replace(/^(\s*)[-*+]\s+/, "$1• ")) })
+    .join("\n").replace(/\n{3,}/g, "\n\n").trim()
+}
+
+// The review line: who approved, who asked for changes, and who is still
+// asked, with the viewer named as "your review". Reviews that only
+// commented carry no verdict and are left out.
+// askedOfYou: the inbox lists it under review requests, which also covers
+// a request to one of your teams.
+function reviewLine(reviews, requested, viewer, decision, askedOfYou) {
+  function names(list) {
+    return list.slice(0, 2).map(function(n) { return "@" + n }).join(", ") + (list.length > 2 ? " +" + (list.length - 2) : "")
+  }
+  var me = String(viewer || "").toLowerCase()
+  var approved = [], changes = [], waiting = [], youAsked = false
+  var r = reviews || [], q = requested || []
+  for (var i = 0; i < r.length && i < 50; i++) {
+    var who = String(r[i].author || "")
+    if (r[i].state === "APPROVED") approved.push(who)
+    else if (r[i].state === "CHANGES_REQUESTED") changes.push(who)
+  }
+  for (var k = 0; k < q.length && k < 50; k++) {
+    if (me !== "" && String(q[k]).toLowerCase() === me) youAsked = true
+    else waiting.push(String(q[k]))
+  }
+  if (askedOfYou === true) youAsked = true
+  var parts = []
+  if (changes.length > 0) parts.push("changes requested by " + names(changes))
+  if (approved.length > 0) parts.push("approved by " + names(approved))
+  if (parts.length === 0) parts.push(decision === "REVIEW_REQUIRED" ? "review required" : "no reviews yet")
+  else if (decision === "REVIEW_REQUIRED" && changes.length === 0) parts.push("more reviews required")
+  if (youAsked) parts.push("your review is requested")
+  else if (waiting.length > 0) parts.push("waiting on " + names(waiting))
+  var text = parts.join(" · ")
+  var tone = changes.length > 0 ? "bad" : (youAsked ? "ask"
+    : (approved.length > 0 && decision !== "REVIEW_REQUIRED" ? "good" : "dim"))
+  return { text: text.charAt(0).toUpperCase() + text.slice(1), tone: tone }
+}
+
+// What a comment card says when nothing is left after cleanup.
+function emptyCommentNote(body, state) {
+  if (state === "APPROVED") return "Approved, no comment"
+  if (state === "CHANGES_REQUESTED") return "Requested changes, no comment"
+  var b = String(body || "").slice(0, 2000).replace(/<!--[\s\S]*?-->/g, "").trim()
+  if (b !== "" && b.split("\n").every(function(l) { return l.trim() === "" || /^\s*>/.test(l) })) return "Only quotes an earlier comment"
+  return "No text preview. Enter opens it."
+}
+
+// The checks line. It leads with how many fail or run, and says when more
+// checks exist than the 100 counted, so a pass is never implied by counts.
+function checksText(c) {
+  if (!c || (c.total || 0) === 0) return "No checks"
+  var counted = c.passed + c.failed + c.pending
+  var partial = c.total > counted ? " (first " + counted + " of " + c.total + ")" : ""
+  var passed = c.passed > 0 ? " · " + c.passed + " passed" : ""
+  if (c.failed > 0) return c.failed + " of " + c.total + " checks failing"
+    + (c.pending > 0 ? " · " + c.pending + " running" : "") + passed + partial
+  if (c.pending > 0) return c.pending + " of " + c.total + " checks running" + passed + partial
+  if (c.state === "FAILURE" || c.state === "ERROR") return "Checks failing" + passed + partial
+  if (c.state === "PENDING" || c.state === "EXPECTED") return "Checks running" + passed + partial
+  return "Checks: " + c.passed + " passed" + partial
+}

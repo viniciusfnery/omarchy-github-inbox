@@ -138,10 +138,172 @@ t("alerts: a key that left and came back alerts again", () => {
   eq(r.fresh.map(x => x.key), ["k1"])
 })
 
+t("comment keys: Ctrl+Enter posts once; its auto-repeat is swallowed, never posted", () => {
+  assert.strictEqual(I.commentKey({ enter: true, ctrl: true, repeat: false }), "submit")
+  // After a failed post, a still-held Ctrl+Enter must not post again.
+  assert.strictEqual(I.commentKey({ enter: true, ctrl: true, repeat: true }), "swallow")
+  assert.strictEqual(I.commentKey({ enter: true, ctrl: false, repeat: false }), "")
+  assert.strictEqual(I.commentKey({ escape: true }), "cancel")
+  assert.strictEqual(I.commentKey({}), "")
+})
+
+t("follow: the pane follows the cursor, empties without a target, and waits while held or busy", () => {
+  const base = { open: true, mode: "", busy: false, hold: false, cursorUrl: "b", previewUrl: "a" }
+  assert.strictEqual(I.followDecision(base), "show")
+  // Cancelled comment, org switch or empty filter: nothing left to preview.
+  assert.strictEqual(I.followDecision({ ...base, cursorUrl: "" }), "clear")
+  assert.strictEqual(I.followDecision({ ...base, cursorUrl: "a" }), "none")
+  assert.strictEqual(I.followDecision({ ...base, hold: true }), "none")
+  assert.strictEqual(I.followDecision({ ...base, busy: true }), "none")
+  assert.strictEqual(I.followDecision({ ...base, mode: "comment" }), "none")
+  assert.strictEqual(I.followDecision({ ...base, open: false }), "none")
+  // Already empty stays empty without work.
+  assert.strictEqual(I.followDecision({ ...base, cursorUrl: "", previewUrl: "" }), "none")
+})
+
+t("hold: deliberate moves, searches and org switches release it, a refresh never does", () => {
+  for (const cause of ["key", "jump", "pointer", "search", "org"]) assert.strictEqual(I.releasesHold(cause), true, cause)
+  for (const cause of ["refresh", "settings", "", "anything else"]) assert.strictEqual(I.releasesHold(cause), false, cause)
+})
+
+t("body blocks: headings, paragraphs, bullets with their depth, numbered items, table rows", () => {
+  const b = I.bodyBlocks("## Summary\nSome **bold** text\nmore\n\n- top\n  - nested `code`\n1. first\n| a | b |\n|---|---|\n| 1 | 2 |")
+  eq(b, [
+    { heading: true, text: "Summary", bullet: "", indent: 0 },
+    { heading: false, text: "Some bold text\nmore", bullet: "", indent: 0 },
+    { heading: false, text: "top", bullet: "•", indent: 0 },
+    { heading: false, text: "nested code", bullet: "•", indent: 1 },
+    { heading: false, text: "first", bullet: "1.", indent: 0 },
+    { heading: false, text: "a · b", bullet: "", indent: 0, columns: true },
+    { heading: false, text: "2", bullet: "", indent: 0, label: "1" }])
+})
+t("markdown noise: images, links, checkboxes, fences, details and quotes read as text", () => {
+  const b = I.bodyBlocks("![shot](https://github.com/user-attachments/x.png)\n<img src=\"https://e.x/a.png\" width=\"300\">\nSee [the docs](https://x.y/z)\n```yaml\nkey: 1\n```\n- [ ] todo\n- [x] done\n<details><summary>More</summary>\nhidden\n</details>")
+  eq(b.map(x => x.bullet + "|" + x.text), ["|[image]\n[image]\nSee the docs\nkey: 1", "[ ]|todo", "[x]|done", "|More\nhidden"])
+  assert.strictEqual(I.plainText("> quoted reply\nmy answer with [a link](https://x)\n\n\n\nend"), "my answer with a link\n\nend")
+})
+
+t("bot bodies: HTML lists, links, tables, rules, autolinks, strike and italics read as text", () => {
+  const b = I.bodyBlocks("<ul>\n<li><a href=\"https://x/c\">f299b52</a> Bump deps</li>\n</ul>\n---\nSee <https://auto.link> and ~~old~~ *new*\n<table><tr><td>a</td></tr></table>\nVec<String> stays")
+  eq(b.map(x => x.text), ["f299b52 Bump deps", "See https://auto.link and old new\na\nVec<String> stays"])
+})
+t("checks: the line leads with how many are failing or running, and says when not all were counted", () => {
+  assert.strictEqual(I.checksText({ passed: 30, failed: 0, pending: 0, total: 30, state: "SUCCESS" }), "Checks: 30 passed")
+  assert.strictEqual(I.checksText({ passed: 24, failed: 2, pending: 0, total: 26, state: "FAILURE" }), "2 of 26 checks failing · 24 passed")
+  assert.strictEqual(I.checksText({ passed: 23, failed: 0, pending: 3, total: 26, state: "PENDING" }), "3 of 26 checks running · 23 passed")
+  assert.strictEqual(I.checksText({ passed: 100, failed: 0, pending: 0, total: 140, state: "FAILURE" }), "Checks failing · 100 passed (first 100 of 140)")
+  assert.strictEqual(I.checksText({ passed: 0, failed: 0, pending: 0, total: 0, state: "" }), "No checks")
+})
+t("markdown cleanup is bounded: a huge hostile body stays fast", () => {
+  const t0 = Date.now()
+  I.bodyBlocks("[".repeat(200000) + "](".repeat(1000))
+  I.plainText("<details".repeat(50000))
+  assert.ok(Date.now() - t0 < 500, "took " + (Date.now() - t0) + " ms")
+})
+
+t("lists: a hard-wrapped item stays one item", () => {
+  const b = I.bodyBlocks("- first item\n  and continues here\n- second")
+  eq(b.map(x => x.bullet + "|" + x.text), ["•|first item and continues here", "•|second"])
+})
+t("checks: running checks are counted beside failing ones", () => {
+  assert.strictEqual(I.checksText({ passed: 20, failed: 2, pending: 4, total: 26, state: "FAILURE" }), "2 of 26 checks failing · 4 running · 20 passed")
+})
+t("entities: the common ones read as their characters, &amp; last", () => {
+  assert.strictEqual(I.cleanLine("&lt;T&gt; &quot;a&quot; it&#39;s&nbsp;x &amp;lt;"), "<T> \"a\" it's x &lt;")
+})
+t("quotes: quoted lines in a description are their own quote blocks", () => {
+  const b = I.bodyBlocks("Bumps lib.\n\n> Release notes\n> fixed a bug\n\nMine again")
+  eq(b.map(x => (x.quote ? "> " : "") + x.text), ["Bumps lib.", "> Release notes\nfixed a bug", "Mine again"])
+})
+
+t("dependabot: HTML blockquote, headings and list items read as quoted headings and bullets", () => {
+  const body = "Bumps [actions/checkout](https://github.com/actions/checkout) from 3 to 4.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://x\">releases</a>.</em></p>\n<blockquote>\n<h2>v4.0.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Update default runtime to node20</li>\n<li>Support fetching without the <code>--progress</code> option</li>\n</ul>\n</blockquote>\n</details>"
+  const b = I.bodyBlocks(body, 20)
+  eq(b.map(x => (x.quote ? "> " : "") + (x.heading ? "# " : "") + x.bullet + "|" + x.text), [
+    "|Bumps actions/checkout from 3 to 4.\nRelease notes\nSourced from releases.",
+    "> # |v4.0.0", "> # |What's Changed",
+    "> •|Update default runtime to node20", "> •|Support fetching without the --progress option"])
+})
+t("hard wraps: a run-on line joins the next with a space; short lines keep their break", () => {
+  const long = "This change moves the cache into its own module so that the panel and"
+  const b = I.bodyBlocks(long + "\nthe script share one place for it.\nShort line\nNext line")
+  eq(b.map(x => x.text), [long + " the script share one place for it.\nShort line\nNext line"])
+})
+t("lists: an indented line after a heading or table row is not glued to the list item", () => {
+  const b = I.bodyBlocks("- a\n## H\n  x")
+  eq(b.map(x => x.text), ["a", "H", "x"])
+})
+
+t("Japanese: a long line ending in 。 keeps its break, and wrapped Japanese joins with no space", () => {
+  const long = "Action Managers の AOBC への要求が AOBC に届くようにし、SILS でも PCDU・NAC の実データで判断することを確認した。"
+  eq(I.bodyBlocks(long + "\n2 行目の別の文です。").map(x => x.text), [long + "\n2 行目の別の文です。"])
+  const wrapped = "分離から THREE_AXIS の三軸制御収束まで Action Managers が自律で進むことを確認するために必要な手順を"
+  eq(I.bodyBlocks(wrapped + "\n追加した").map(x => x.text), [wrapped + "追加した"])
+})
+t("quotes: a nested or stray closing blockquote does not end the outer quote", () => {
+  const b = I.bodyBlocks("Bumps x.\n<blockquote>\n<h2>v2</h2>\n<p>notes</blockquote></p>\n<p>Reviewed by the security team, safe to merge.</p>\n</blockquote>\nAfter")
+  eq(b.map(x => (x.quote ? "> " : "") + x.text), ["Bumps x.", "> v2", "> notes\nReviewed by the security team, safe to merge.", "After"])
+})
+
+t("quotes: a body cut short keeps its quote to the end, even past a stray close", () => {
+  const body = "Bumps x.\n<blockquote>\n<h2>v2</h2>\n<p>fix</p>\n</blockquote>\n<p>Reviewed by the maintainers: safe to merge.</p>\n" + "pad ".repeat(50) + "…"
+  const b = I.bodyBlocks(body, 20)
+  assert.ok(b.filter(x => /safe to merge/.test(x.text)).every(x => x.quote), JSON.stringify(b))
+})
+t("quotes: a closing tag hidden in an HTML comment still counts as the last close", () => {
+  const b = I.bodyBlocks("<blockquote>\nq\n</blockquote>\nFAKE\n<!--\n</blockquote>\n-->\nend", 20)
+  assert.ok(b.filter(x => /FAKE/.test(x.text)).every(x => x.quote), JSON.stringify(b))
+})
+
+t("comments: emoji codes read as emoji, and tags or links cut by the 400-character limit go", () => {
+  assert.strictEqual(I.plainText(":white_check_mark: All lines covered :x: one :warning:"), "✓ All lines covered ❌ one ⚠️")
+  assert.strictEqual(I.plainText("Summary\n<source media=\"(prefers-color-scheme: dark)\" srcset=\"https://storage.googleapis.com/coderab…"), "Summary")
+  assert.strictEqual(I.plainText("Comparing base ([2f4d84f](https://app.codecov.io/gh/ut-issl/cosmica/commit…"), "Comparing base (2f4d84f")
+})
+
+t("tables: a header row is column names, a data row leads with its first cell", () => {
+  eq(I.bodyBlocks("| key | value | note |\n|---|---|---|\n| a | 1 | x |\n| only |"), [
+    { heading: false, text: "key · value · note", bullet: "", indent: 0, columns: true },
+    { heading: false, text: "1 · x", bullet: "", indent: 0, label: "a" },
+    { heading: false, text: "only", bullet: "", indent: 0 }])
+})
+t("text: a closing bracket never starts a wrapped line, and check marks read as text", () => {
+  assert.strictEqual(I.cleanLine("chore/bump-cabosu-<版> の PR（下書き）"), "chore/bump-cabosu-<\u2060版\u2060> の PR（\u2060下書き\u2060）")
+  assert.strictEqual(I.plainText("✅ All covered ✔️ ok ☑️ done"), "✓ All covered ✓ ok ✓ done")
+})
+t("reviews: a request to your team counts as yours", () => {
+  eq(I.reviewLine([], ["org/team"], "me", "", true), { text: "No reviews yet · your review is requested", tone: "ask" })
+})
+t("comments: list markers read as bullets", () => {
+  assert.strictEqual(I.plainText("Checked:\n- one\n  * two\n1. three"), "Checked:\n• one\n  • two\n1. three")
+})
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])
   assert.strictEqual(I.undismissed([{ threadId: "1", updatedAt: "t2" }], { "1": "t1" }).length, 1)
+})
+
+t("body blocks: a GitHub alert reads as a heading inside its quote, warnings urgent", () => {
+  eq(I.bodyBlocks("> [!WARNING]\n> Be careful\n\n> [!NOTE]\n> Fyi"), [
+    { heading: true, text: "Warning", bullet: "", indent: 0, quote: true, urgent: true },
+    { heading: false, text: "Be careful", bullet: "", indent: 0, quote: true },
+    { heading: true, text: "Note", bullet: "", indent: 0, quote: true },
+    { heading: false, text: "Fyi", bullet: "", indent: 0, quote: true }])
+})
+t("reviews: who approved, who asked for changes, and whether my review is asked", () => {
+  eq(I.reviewLine([{ author: "a", state: "APPROVED" }], [], "me", ""), { text: "Approved by @a", tone: "good" })
+  eq(I.reviewLine([{ author: "a", state: "CHANGES_REQUESTED" }, { author: "b", state: "APPROVED" }, { author: "c", state: "COMMENTED" }], ["ME"], "me", "CHANGES_REQUESTED"),
+    { text: "Changes requested by @a · approved by @b · your review is requested", tone: "bad" })
+  eq(I.reviewLine([], ["x", "org/team", "z"], "me", ""), { text: "No reviews yet · waiting on @x, @org/team +1", tone: "dim" })
+  eq(I.reviewLine([], ["me"], "me", "REVIEW_REQUIRED"), { text: "Review required · your review is requested", tone: "ask" })
+  eq(I.reviewLine([{ author: "a", state: "APPROVED" }], [], "me", "REVIEW_REQUIRED"), { text: "Approved by @a · more reviews required", tone: "dim" })
+  eq(I.reviewLine(null, null, "", ""), { text: "No reviews yet", tone: "dim" })
+})
+t("comments: an empty cleaned comment says why, never that it quoted when it did not", () => {
+  assert.strictEqual(I.emptyCommentNote("<!-- walkthrough -->\n<details>", ""), "No text preview. Enter opens it.")
+  assert.strictEqual(I.emptyCommentNote("> earlier words\n> more", ""), "Only quotes an earlier comment")
+  assert.strictEqual(I.emptyCommentNote("", "APPROVED"), "Approved, no comment")
+  assert.strictEqual(I.emptyCommentNote("", "CHANGES_REQUESTED"), "Requested changes, no comment")
 })
 
 console.log("\n" + pass + " passed, " + fail + " failed")
