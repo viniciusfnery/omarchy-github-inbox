@@ -539,12 +539,23 @@ Panel {
 
   // Both columns need about 852 units. On a screen too narrow for that the
   // pane takes the panel on its own, and p or Esc goes back to the list.
-  readonly property bool paneFits: panel.availableCardWidth <= 0 || panel.availableCardWidth >= Style.space(852)
+  // Decided when the pane opens, from the room beside the closed card: the
+  // pane goes on the chip's side if it fits there, the other side if it
+  // fits there, and alone in the panel otherwise. That way widening never
+  // pushes the list, even when the screen edge clamps the card.
+  property bool paneFits: true
   readonly property bool paneSolo: previewOpen && !paneFits
 
   function pickPaneSide() {
     var w = panel.screenW
-    paneOnLeft = w <= 0 || panel.anchorScreenPos.x + panel.anchorW / 2 > w / 2
+    if (w <= 0) { paneOnLeft = true; paneFits = true; return }
+    var need = Style.space(452)
+    var leftRoom = panel.cardOrigin.x - panel.margin
+    var rightRoom = w - panel.margin - (panel.cardOrigin.x + panel.contentWidth)
+    var preferLeft = panel.anchorScreenPos.x + panel.anchorW / 2 > w / 2
+    if (preferLeft ? leftRoom >= need : rightRoom >= need) { paneOnLeft = preferLeft; paneFits = true }
+    else if (preferLeft ? rightRoom >= need : leftRoom >= need) { paneOnLeft = !preferLeft; paneFits = true }
+    else { paneOnLeft = preferLeft; paneFits = false }
   }
   signal commentPosted(string url)
   // A reload that must start fresh: an answer already in flight began
@@ -563,7 +574,14 @@ Panel {
   }
 
   // Back from comment or merge: catch up with the cursor if it moved.
-  onPreviewModeChanged: if (previewMode === "" && previewOpen && !actionBusy && cursorUrl !== "" && cursorUrl !== previewUrl) previewDebounce.restart()
+  // After a finished comment or merge the pane stays on its item, notice
+  // and all, until the user moves; only a cancel catches up at once.
+  property bool holdAfterAction: false
+  onPreviewModeChanged: {
+    if (previewMode !== "" || !previewOpen || actionBusy) return
+    if (holdAfterAction) { holdAfterAction = false; return }
+    if (cursorUrl !== "" && cursorUrl !== previewUrl) showPreview(cursorUrl, true)
+  }
 
   function togglePreview() {
     if (actionBusy) return
@@ -607,8 +625,9 @@ Panel {
       return
     }
     if (previewOpen && previewMode === "" && !actionBusy) {
-      if (cachedPreview(cursorUrl, 300000)) showPreview(cursorUrl)
-      else previewDebounce.restart()
+      // The pane switches at once, so c and m can only act on the item the
+      // cursor shows; only the fetch waits for the cursor to settle.
+      showPreview(cursorUrl, true)
     } else if (!previewOpen) {
       prefetchTimer.restart()
     }
@@ -616,7 +635,10 @@ Panel {
   Timer {
     id: previewDebounce
     interval: 120
-    onTriggered: if (root.previewMode === "" && !root.actionBusy) root.showPreview(root.cursorUrl)
+    onTriggered: if (root.previewMode === "" && !root.actionBusy && root.previewLoading) {
+      root.loadPreview()
+      root.prefetchNeighbors()
+    }
   }
   Timer {
     id: prefetchTimer
@@ -656,7 +678,7 @@ Panel {
     loadPreview()
   }
 
-  function showPreview(url) {
+  function showPreview(url, deferFetch) {
     if (actionBusy) return
     if (url !== previewUrl) unknownRetries = 0
     previewStale = false
@@ -668,6 +690,7 @@ Panel {
     var hit = cachedPreview(url, 300000)
     previewData = hit ? hit.data : null
     previewLoading = !hit || Date.now() - hit.at > 60000
+    if (previewLoading && deferFetch === true) { previewDebounce.restart(); return }
     if (previewLoading) loadPreview()
     prefetchNeighbors()
   }
@@ -812,6 +835,7 @@ Panel {
   }
 
   function startComment() {
+    if (previewMode === "comment") { previewPane.focusComment(); return }
     if (!previewData || actionBusy) return
     previewDebounce.stop()
     previewNotice = ""
@@ -894,6 +918,7 @@ Panel {
       return
     }
     if (kind === "comment") commentPosted(actionProcess.target)
+    holdAfterAction = true
     previewMode = ""
     if (previewUrl === actionProcess.target) notice(kind === "merge" ? "Merged" : "Comment posted", false)
     // Show what GitHub now says, and let the list catch up with a merge.
@@ -1170,6 +1195,7 @@ Panel {
   }
 
   function openSearch() {
+    if (previewMode === "merge" && !actionBusy) previewMode = ""
     keysOpen = false
     if (settingsOpen) closeSettings()
     Qt.callLater(function() { if (panelFlick) panelFlick.contentY = 0 })
@@ -1308,6 +1334,7 @@ Panel {
     // closed, keeps its pane so its outcome is seen.
     var keepPane = previewOpen && (actionBusy || actionUnseen)
     actionUnseen = false
+    if (keepPane && previewMode === "comment" && !actionBusy) Qt.callLater(function() { previewPane.focusComment() })
     if (!keepPane) {
       previewOpen = false
       previewMode = ""
@@ -1638,7 +1665,7 @@ Panel {
       Shortcut {
         sequences: ["Return", "Enter"]
         autoRepeat: false
-        enabled: root.previewOpen && root.previewMode === "merge"
+        enabled: root.previewOpen && root.previewMode === "merge" && !searchField.activeFocus
         onActivated: root.confirmMerge()
       }
       Shortcut {

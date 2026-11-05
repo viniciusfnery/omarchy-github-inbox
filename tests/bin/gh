@@ -61,6 +61,8 @@ url="${1:-}"
 
 # preview.sh's single GraphQL query.
 if [[ $url == graphql ]]; then
+  #   FAKE_GH_PREVIEW_ERR=<text> -> that text on stderr, exit 1
+  if [[ -n ${FAKE_GH_PREVIEW_ERR:-} ]]; then printf '%s\n' "$FAKE_GH_PREVIEW_ERR" >&2; exit 1; fi
   if [[ ${FAKE_GH_PREVIEW_FAIL:-0} == 1 ]]; then echo '{"errors":[{"message":"Could not resolve"}]}'; exit 1; fi
   cat "${FAKE_GH_FIXTURES:?}/graphql.json"
   exit 0

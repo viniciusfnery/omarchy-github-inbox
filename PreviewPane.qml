@@ -29,6 +29,8 @@ Item {
   readonly property real maxScroll: Math.max(0, flick.contentHeight - flick.height)
   readonly property bool moreBelow: flick.contentY < maxScroll - 1
 
+  function focusComment() { commentBox.forceActiveFocus() }
+
   function scrollBy(direction) {
     scrollGlide.stop()
     scrollGlide.to = Math.max(0, Math.min(maxScroll, flick.contentY + direction * flick.height * 0.5))
@@ -158,7 +160,9 @@ Item {
 
       // ---------- Header: kind, repo and number, state ----------
       Item {
-        visible: pane.d !== null
+        // In single-column mode this row carries Back, so it stays even
+        // when there is nothing to preview.
+        visible: pane.d !== null || pane.solo
         width: parent.width
         implicitHeight: Math.max(headerText.implicitHeight, statePill.implicitHeight, backButton.visible ? backButton.implicitHeight : 0)
 
@@ -578,7 +582,8 @@ Item {
           onActiveFocusChanged: pane.inbox.commentFocused = activeFocus
           Keys.onPressed: function(event) {
             if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & Qt.ControlModifier)) {
-              pane.inbox.sendComment(commentBox.text)
+              // A held Ctrl+Enter must not post again after a failure.
+              if (!event.isAutoRepeat) pane.inbox.sendComment(commentBox.text)
               event.accepted = true
             } else if (event.key === Qt.Key_Escape) {
               pane.inbox.previewMode = ""

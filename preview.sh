@@ -46,8 +46,20 @@ view)
         comments(last: 3) { nodes { author { login } createdAt body } } } } }'
   fi
   # Owner and repo as strings (-f): -F would turn a numeric name into an int.
-  json=$(gh api graphql -f query="$q" -f owner="$owner" -f repo="$repo" -F number="$number" 2>/dev/null) ||
-    fail "GitHub did not return this $kind"
+  errfile=$(mktemp) || fail "No temporary file"
+  trap 'rm -f "$errfile"' EXIT
+  json=$(gh api graphql -f query="$q" -f owner="$owner" -f repo="$repo" -F number="$number" 2>"$errfile") || {
+    # Name the cause, so Retry is not a guess. Only a bounded first line of
+    # gh's own message is ever shown, never as an argument.
+    err=$(head -c 500 "$errfile" | head -n 1)
+    case $err in
+    *"Bad credentials"* | *"HTTP 401"* | *"auth login"*) fail "Not signed in to GitHub: run gh auth login" ;;
+    *"Could not resolve to a"* | *"HTTP 404"* | *"NOT_FOUND"*) fail "This $kind does not exist, or you cannot see it" ;;
+    *"rate limit"*) fail "GitHub rate limit reached, try again in a minute" ;;
+    *"connecting to"* | *"no such host"* | *"timeout"* | *"network"*) fail "GitHub is unreachable: check the connection" ;;
+    *) fail "GitHub did not return this $kind: ${err:-no details}" ;;
+    esac
+  }
   # gh output is bounded here, before jq ever sees it, and goes in on stdin.
   (( ${#json} <= 2097152 )) || fail "GitHub data unexpectedly large"
   jq -e '.data.repository.item | type == "object"' >/dev/null 2>&1 <<<"$json" || fail "GitHub did not return this $kind"
