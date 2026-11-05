@@ -234,6 +234,17 @@ t("lists: an indented line after a heading or table row is not glued to the list
   eq(b.map(x => x.text), ["a", "H", "x"])
 })
 
+t("Japanese: a long line ending in 。 keeps its break, and wrapped Japanese joins with no space", () => {
+  const long = "Action Managers の AOBC への要求が AOBC に届くようにし、SILS でも PCDU・NAC の実データで判断することを確認した。"
+  eq(I.bodyBlocks(long + "\n2 行目の別の文です。").map(x => x.text), [long + "\n2 行目の別の文です。"])
+  const wrapped = "分離から THREE_AXIS の三軸制御収束まで Action Managers が自律で進むことを確認するために必要な手順を"
+  eq(I.bodyBlocks(wrapped + "\n追加した").map(x => x.text), [wrapped + "追加した"])
+})
+t("quotes: a nested or stray closing blockquote does not end the outer quote", () => {
+  const b = I.bodyBlocks("Bumps x.\n<blockquote>\n<h2>v2</h2>\n<p>notes</blockquote></p>\n<p>Reviewed by the security team, safe to merge.</p>\n</blockquote>\nAfter")
+  eq(b.map(x => (x.quote ? "> " : "") + x.text), ["Bumps x.", "> v2", "> notes\nReviewed by the security team, safe to merge.", "After"])
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

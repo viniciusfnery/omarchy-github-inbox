@@ -232,6 +232,12 @@ function bodyBlocks(text, maxBlocks) {
   var paraQuote = false
   var htmlQuote = false
   var inList = false
+  // The HTML quote runs from the first <blockquote> to the last
+  // </blockquote>: a nested or stray closing tag inside quoted release
+  // notes must not end it early and let quoted text pass as the author's.
+  // Two separate quotes then dim the text between them, the safe side.
+  var lastClose = -1
+  for (var c = 0; c < lines.length; c++) if (/<\/blockquote>/i.test(lines[c])) lastClose = c
   // Every block made inside a quote is marked, so quoted release notes in
   // a bot's PR never read as the author's words.
   function block(heading, txt, bullet, indent, quote) {
@@ -246,8 +252,11 @@ function bodyBlocks(text, maxBlocks) {
     var t = ""
     for (var k = 0; k < para.length; k++) {
       var prev = k > 0 ? para[k - 1] : ""
-      var runOn = prev.length > 60 && !/[.!?:]$|  $/.test(prev)
-      t += k === 0 ? para[k] : (runOn ? " " : "\n") + para[k]
+      // Full-width punctuation ends a sentence too, and Japanese or
+      // Chinese text runs on with no space between the lines.
+      var runOn = prev.length > 60 && !/[.!?:。！？：」）)]$|  $/.test(prev)
+      var cjk = /[\u3000-\u9fff\uff00-\uffef]$/.test(prev) || /^[\u3000-\u9fff\uff00-\uffef]/.test(para[k])
+      t += k === 0 ? para[k] : (runOn ? (cjk ? "" : " ") : "\n") + para[k]
     }
     t = t.trim()
     if (t !== "") block(false, t, "", 0, paraQuote || htmlQuote)
@@ -264,7 +273,7 @@ function bodyBlocks(text, maxBlocks) {
     }
     inList = false
     if (/<blockquote\b/i.test(raw)) { flush(); htmlQuote = true }
-    var closesQuote = /<\/blockquote>/i.test(raw)
+    var closesQuote = i === lastClose
     if (/^\s*```/.test(raw) || /^\s*([-*_]\s*){3,}$/.test(raw) || /^\s*\|[\s:|-]+\|\s*$/.test(raw)) {
       if (closesQuote) { flush(); htmlQuote = false }
       continue

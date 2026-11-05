@@ -554,7 +554,7 @@ Item {
         width: Math.min(implicitWidth, parent.width)
         wrapMode: Text.Wrap
         text: pane.inbox.previewStale
-          ? "Could not refresh: " + pane.inbox.previewError + ". Showing the last loaded version."
+          ? "Could not refresh: " + pane.inbox.previewError.replace(/[.。]$/, "") + ". Showing the last loaded version."
           : "Could not load: " + pane.inbox.previewError
         textFormat: Text.PlainText
         color: pane.inbox.urgent
