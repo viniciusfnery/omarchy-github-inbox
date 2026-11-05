@@ -8,9 +8,10 @@ is one click (or one keystroke) away from its page on GitHub.
 
 ## Sections
 
-- **Notifications**: your unread GitHub notifications, minus anything another
-  section already represents; clicking a row dismisses it here *and* marks the
-  thread read on GitHub
+- **Notifications**: your unread GitHub notifications, minus the mentions the
+  Mentions section already lists. Opening a row or dismissing it (`d`, `x`,
+  right-click, or the × on the selected row) removes it here and marks the
+  thread read on GitHub a few seconds later, so `u` can still undo it
 - **Pull requests**: open PRs you authored or are assigned to (drafts dimmed)
 - **Review requests**: open PRs where your review was requested
 - **Issues**: open issues assigned to you
@@ -34,6 +35,11 @@ switches to the urgent color while unread notifications or mentions wait.
 | `h`/`l` or ←/→ | Switch organization filter |
 | `[` / `]` | Jump between sections |
 | `Enter` | Open the selected row in the browser |
+| `d`, `x`, right-click | Dismiss the selected notification, or clear a mention's unread dot, without opening it (undoable with `u`) |
+| `D` | Dismiss every notification shown (respects the org filter and fuzzy find) |
+| `u` | Undo the last dismissal, from any monitor, within 5 seconds (GitHub is told only after that) |
+| `f` | Toggle focus mode |
+| `s` | Open or close settings |
 | `/` | Fuzzy find (neovim-style subsequence match on titles, repos, and section names, scoped to the active org filter); `Enter` accepts the filter and returns to navigation, `Esc` clears |
 | `r` | Refresh |
 
@@ -42,6 +48,8 @@ IPC works from anywhere, always targeting the focused monitor's instance:
 ```bash
 omarchy-shell viniciusfnery.github-inbox toggle   # or: open, close, refresh
 omarchy-shell viniciusfnery.github-inbox find     # open with fuzzy find focused
+omarchy-shell viniciusfnery.github-inbox settings # open on the settings view
+omarchy-shell viniciusfnery.github-inbox focus    # toggle focus mode, prints on/off
 ```
 
 A keybinding, in `~/.config/hypr/bindings.lua`:
@@ -79,6 +87,31 @@ instead of silently going empty, and recovers on its own within
 
 ## Settings
 
+Press `s` in the panel, or click the gear, to open its settings view. It
+holds two switches and a list of every org the inbox has seen, with each
+org's repos one `l` (or click on the chevron) away:
+
+- **Desktop notifications** pops up a notification for each new GitHub
+  notification or mention, and clicking it opens the page. More than three
+  at once arrive as one summary. Only one monitor's copy of the widget sends
+  them, so nothing arrives twice. Omarchy keeps a history of every toast in
+  `~/.local/state/omarchy/notifications/` with default file modes, so on a
+  shared machine with a readable home directory, private PR titles land
+  there too.
+- **Focus mode** narrows the whole plugin to the orgs and repos you target
+  with the ◎ button (`f` on a row): the panel, the chip count, its urgent
+  color, and desktop notifications. The chip swaps the octocat for a target
+  while it is on, and a banner in the panel says how many other items wait.
+  With nothing targeted, focus mode changes nothing.
+- **The checkbox** on an org or repo hides it everywhere (`space`). An org
+  setting covers all its repos, including ones that show up later, and a
+  repo can still be switched on its own inside it. An org with mixed repos
+  shows a partial checkbox or a dimmed target, and toggling it makes the
+  whole org match.
+
+The panel saves these with the same mechanism as `omarchy bar set`, so they
+land in `shell.json` next to the settings below.
+
 Settings live in the widget's entry in `~/.config/omarchy/shell.json`. Edit
 that file directly (it hot-reloads on save), or set values from the terminal:
 
@@ -96,6 +129,10 @@ settings UI under the bar widget's options.
 | `mentionLimit` | `30` | How many open mention threads to track |
 | `closedDays` | `30` | How far back "recently closed" looks |
 | `closedLimit` | `5` | Closed rows shown per org tab |
+| `desktopNotifications` | `false` | Pop up new notifications and mentions |
+| `focusMode` | `false` | Narrow everything to the `focus` list |
+| `hidden` | `[]` | Orgs (`acme`) and repos (`acme/api`) never shown. `!acme/api` keeps one repo of a hidden org |
+| `focus` | `[]` | Orgs and repos focus mode keeps, with the same `!` exceptions |
 
 ## Uninstall
 
@@ -117,9 +154,12 @@ The plugin never touches your GitHub credentials; those belong to the
 
 ## Development
 
-`fetch.sh` (the data collector) is covered by a token-free test suite that
-runs it against a fake `gh` serving fixtures, including regression tests for
-rate-limit garbage on stdout, oversized payloads, and cache poisoning:
+`fetch.sh` (the data collector) and `notify.sh` (desktop notifications) are
+covered by a token-free test suite that runs them against a fake `gh`,
+`notify-send`, and browser launcher, including regression tests for
+rate-limit garbage on stdout, oversized payloads, and cache poisoning. The
+same command runs `tests/inbox.test.js` under node, which checks the panel's
+filtering and settings logic in `Inbox.js`:
 
 ```bash
 tests/run.sh
@@ -129,8 +169,9 @@ CI runs the suite plus shellcheck and a manifest sanity check on every push.
 
 ## Notes on behavior
 
-- Auth rides the `gh` CLI's login; a signed-out or offline state shows an
-  error card while the last good data stays visible, retrying every 30s.
+- Auth rides the `gh` CLI's login. A signed-out, offline, or rate-limited
+  refresh shows an error card while the last good data stays visible, and
+  retries every 30s.
 - Results are cached for 60s (`~/.cache/omarchy-github-tasks.json`) so
   multi-monitor bars share one API burst; a cold refresh makes ~8 requests,
   well inside GitHub's rate limits.

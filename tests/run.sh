@@ -83,7 +83,7 @@ fresh_env() {
   export PATH="$TESTS_DIR/bin:$BASE_PATH"
   export FAKE_GH_FIXTURES="$TMP/fixtures"
   export FAKE_GH_LOG="$TMP/gh.log"
-  unset FAKE_GH_AUTH_FAIL FAKE_GH_API_FAIL
+  unset FAKE_GH_AUTH_FAIL FAKE_GH_API_FAIL FAKE_GH_PATCH_FAIL FAKE_NOTIFY_ACTION
   mkdir -p "$HOME" "$XDG_CACHE_HOME" "$FAKE_GH_FIXTURES"
   : >"$FAKE_GH_LOG"
   write_fixtures "$FAKE_GH_FIXTURES"
@@ -111,6 +111,20 @@ t "happy: closed merges three sources, dedupes, drops >30d" \
 t "happy: closed kinds detected (mention-sourced PR included)" \
   "$(jqt '[.closed[] | select(.kind == "pr")] | length == 2' "$out")"
 t "happy: result cached" "$(jqt '.error == ""' "$(cat "$CACHE")")"
+t "happy: output carries when GitHub was asked, in epoch seconds" \
+  "$(jqt '(.fetchedAt | type == "number") and (now - .fetchedAt < 60)' "$out")"
+
+# A mention notification on a thread the open-mentions search cannot see (a
+# closed thread, say) must stay in Notifications instead of vanishing.
+fresh_env
+jq --arg d "$(iso "1 hour ago")" '. + [{id: "14", reason: "mention", updated_at: $d,
+  subject: {title: "Mentioned on a closed thread", type: "Issue",
+            url: "https://api.github.com/repos/acme/repo1/issues/99"},
+  repository: {full_name: "acme/repo1", html_url: "https://github.com/acme/repo1"}}]' \
+  "$FAKE_GH_FIXTURES/notifications.json" >"$TMP/n.json" && mv "$TMP/n.json" "$FAKE_GH_FIXTURES/notifications.json"
+out=$(bash "$FETCH")
+t "mentions: a mention notification outside the mentions list stays a notification" \
+  "$(jqt '([.notifications[].threadId] | index("14")) and ([.notifications[].threadId] | index("11") | not)' "$out")"
 
 # ------------------------------------------------------------- cache behavior
 calls_before=$(wc -l <"$FAKE_GH_LOG")
@@ -128,8 +142,11 @@ t "cache: empty (poisoned) cache is ignored and rebuilt" \
 fresh_env
 export FAKE_GH_API_FAIL=1
 out=$(bash "$FETCH")
-t "rate limit: error bodies on stdout never corrupt the output" \
-  "$(jqt '.error == "" and .prs == [] and .notifications == []' "$out")"
+# The panel keeps its last good lists on an error record, so a rate-limited
+# refresh must say so instead of passing for an empty inbox.
+t "rate limit: error bodies on stdout become an error record, not empty lists" \
+  "$(jqt '(.error | contains("GitHub API")) and .prs == [] and .notifications == []' "$out")"
+t "rate limit: nothing is cached" "$([[ ! -e $CACHE ]] && echo true || echo false)"
 
 fresh_env
 export FAKE_GH_AUTH_FAIL=1
@@ -166,6 +183,52 @@ echo '{"cached": true}' >"$CACHE"
 bash "$FETCH" --mark-read 42 >/dev/null
 t "mark-read: PATCHes the thread and drops the cache" \
   "$(grep -q 'api --method PATCH notifications/threads/42' "$FAKE_GH_LOG" && [[ ! -e $CACHE ]] && echo true || echo false)"
+
+fresh_env
+bash "$FETCH" --mark-read 42 43 >/dev/null
+t "mark-read: several ids in one call PATCH each thread" \
+  "$(grep -q 'notifications/threads/42' "$FAKE_GH_LOG" && grep -q 'notifications/threads/43' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+export FAKE_GH_PATCH_FAIL=43
+out=$(bash "$FETCH" --mark-read 42 43)
+t "mark-read: prints the ids GitHub refused, one per line" "$([[ $out == 43 ]] && echo true || echo false)"
+unset FAKE_GH_PATCH_FAIL
+
+fresh_env
+bash "$FETCH" --mark-read 42 "1;touch $TMP/pwned" "../x" >/dev/null
+t "mark-read: non-numeric ids are skipped, numeric ones still sent" \
+  "$([[ $(grep -c PATCH "$FAKE_GH_LOG") -eq 1 && ! -e $TMP/pwned ]] && echo true || echo false)"
+
+# ------------------------------------------------------ desktop notifications
+# notify.sh detaches one waiter per notification. FAKE_NOTIFY_ACTION is what
+# the fake notify-send reports the user clicked.
+wait_for() { for _ in $(seq 50); do eval "$1" && return 0; sleep 0.1; done; return 1; }
+
+fresh_env
+export FAKE_NOTIFY_ACTION=default
+bash "$PWD/notify.sh" "https://github.com/acme/repo1/pull/1" "Fix it" "acme/repo1 · review requested"
+t "notify: click opens the github.com URL" \
+  "$(wait_for 'grep -q "^browser https://github.com/acme/repo1/pull/1$" "$FAKE_GH_LOG"' && echo true || echo false)"
+t "notify: summary and body reach notify-send with a default action" \
+  "$(grep -q '^notify-send --app-name=GitHub -A default=Open -- Fix it acme/repo1 · review requested$' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+export FAKE_NOTIFY_ACTION=default
+bash "$PWD/notify.sh" "https://evil.example/x" "A" "B" "https://github.com/a/b" "C" "D"
+wait_for '[[ $(grep -c "^notify-send" "$FAKE_GH_LOG") -eq 2 ]]'
+sleep 0.3
+t "notify: several notifications in one call, only github.com ever opens" \
+  "$([[ $(grep -c '^notify-send' "$FAKE_GH_LOG") -eq 2 && $(grep -c '^browser' "$FAKE_GH_LOG") -eq 1 ]] && grep -q '^browser https://github.com/a/b$' "$FAKE_GH_LOG" && echo true || echo false)"
+unset FAKE_NOTIFY_ACTION
+
+# The notification body is markup to the server (Omarchy renders it as
+# StyledText), so GitHub text must arrive escaped, never as tags.
+fresh_env
+bash "$PWD/notify.sh" "https://github.com/a/b" "Title <b>x</b>" "<a href='https://evil.example'>click</a> & more"
+wait_for '[[ $(grep -c "^notify-send" "$FAKE_GH_LOG") -eq 1 ]]'
+t "notify: body markup is escaped, summary stays as given" \
+  "$(grep -qF -- "-- Title <b>x</b> &lt;a href='https://evil.example'&gt;click&lt;/a&gt; &amp; more" "$FAKE_GH_LOG" && echo true || echo false)"
 
 # ------------------------------------------------- hostile cache-path shapes
 fresh_env
@@ -219,6 +282,8 @@ out=$(bash "$FETCH")
 t "url allowlist: non-github.com rows are dropped everywhere" \
   "$(jqt '(.issues | length == 1) and (.issues[0].url | startswith("https://github.com/")) and (.notifications | length == 0)' "$out")"
 
+echo
+node tests/inbox.test.js || fail=$((fail + 1))
 echo
 echo "$pass passed, $fail failed"
 exit "$((fail > 0 ? 1 : 0))"

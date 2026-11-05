@@ -15,7 +15,7 @@
     },
     "barWidget": {
         "displayName": "GitHub Inbox",
-        "description": "A bar chip with your open PR/review/issue count; the panel lists pull requests, review requests, issues, notifications (dismissed on click), mentions with unread dots, and recently closed items: org-filterable, fuzzy-searchable, fully keyboard-driven, every row opening in the browser.",
+        "description": "A bar chip with your open PR/review/issue count; the panel lists pull requests, review requests, issues, notifications (dismiss with d, right-click, or open to dismiss, with undo), mentions with unread dots, and recently closed items: org-filterable, fuzzy-searchable, fully keyboard-driven. Settings (s) hide orgs or repos, set a focus mode that narrows the inbox, chip, and alerts to chosen orgs and repos, and turn on desktop notifications.",
         "category": "Development",
         "defaultSection": "right",
         "aliases": [
@@ -26,7 +26,11 @@
             "refreshIntervalSec": 300,
             "mentionLimit": 30,
             "closedDays": 30,
-            "closedLimit": 5
+            "closedLimit": 5,
+            "desktopNotifications": false,
+            "focusMode": false,
+            "hidden": [],
+            "focus": []
         },
         "schema": [
             {
@@ -64,6 +68,20 @@
                 "max": 20,
                 "step": 1,
                 "defaultValue": 5
+            },
+            {
+                "key": "desktopNotifications",
+                "type": "boolean",
+                "label": "Desktop notifications",
+                "description": "Pop up new GitHub notifications and mentions on the desktop.",
+                "defaultValue": false
+            },
+            {
+                "key": "focusMode",
+                "type": "boolean",
+                "label": "Focus mode",
+                "description": "Only orgs and repos targeted in the panel's settings (press s) show, count, and notify.",
+                "defaultValue": false
             }
         ]
     }

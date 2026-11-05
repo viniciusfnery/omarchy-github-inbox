@@ -4,6 +4,7 @@
 #   FAKE_GH_AUTH_FAIL=1  -> `gh auth status` fails (signed out)
 #   FAKE_GH_API_FAIL=1   -> API calls print an error body to stdout and exit 1,
 #                           exactly like the real gh does on HTTP errors
+#   FAKE_GH_PATCH_FAIL   -> see the --mark-read branch below
 [[ -n ${FAKE_GH_LOG:-} ]] && printf '%s\n' "$*" >>"$FAKE_GH_LOG"
 
 if [[ ${1:-} == auth ]]; then
@@ -13,7 +14,9 @@ fi
 shift
 
 # --mark-read side entrance: gh api --method PATCH notifications/threads/<id>
+#   FAKE_GH_PATCH_FAIL=<id> -> that thread's PATCH fails
 if [[ ${1:-} == --method ]]; then
+  [[ ${3:-} == "notifications/threads/${FAKE_GH_PATCH_FAIL:-none}" ]] && exit 1
   exit 0
 fi
 

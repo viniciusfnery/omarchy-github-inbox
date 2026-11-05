@@ -1,0 +1,5 @@
+#!/bin/bash
+# Fake notify-send: logs its argv and "clicks" $FAKE_NOTIFY_ACTION.
+[[ -n ${FAKE_GH_LOG:-} ]] && printf 'notify-send %s\n' "$*" >>"$FAKE_GH_LOG"
+[[ -n ${FAKE_NOTIFY_ACTION:-} ]] && echo "$FAKE_NOTIFY_ACTION"
+exit 0
