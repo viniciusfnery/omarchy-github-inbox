@@ -5,6 +5,7 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Inbox.js" as Inbox
 
 Panel {
   id: root
@@ -18,6 +19,7 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property string scriptPath: Qt.resolvedUrl("fetch.sh").toString().replace(/^file:\/\//, "")
+  readonly property string notifyPath: Qt.resolvedUrl("notify.sh").toString().replace(/^file:\/\//, "")
 
   // Never name this `data`: that shadows Item's default property and steals
   // every declared child from the scene.
@@ -30,28 +32,95 @@ Panel {
   // Bound clock: relative times keep updating while the panel sits open.
   property double nowMs: Date.now()
 
+  // ------------------------------------------------ settings (shell.json entry)
+  //
+  // Written through the shell's setBarWidget, the same path `omarchy bar set`
+  // takes. `pending` holds a just-written value until the shell hands the
+  // entry back, so a toggle answers instantly.
+  property var pending: ({})
+  // Deferred: settings first arrive while bindings that read `pending` are
+  // still evaluating, and clearing it there is a binding loop.
+  onSettingsChanged: Qt.callLater(clearPending)
+  function clearPending() { pending = ({}) }
+
+  function pref(name, fallback) {
+    return pending[name] !== undefined ? pending[name] : setting(name, fallback)
+  }
+
+  function scopePref(name) { return Inbox.scopeList(pref(name, [])) }
+
+  // Only the four keys this panel owns, holding a boolean or a list of
+  // validScope() strings, reach the shell, and as argv with no shell in
+  // between. The leading space in the value is load-bearing: `qs ipc` splits
+  // an argument that starts with "[" into several.
+  readonly property var prefKeys: ["hidden", "focus", "focusMode", "desktopNotifications"]
+
+  function savePref(name, value) {
+    if (prefKeys.indexOf(name) < 0) return
+    if (typeof value !== "boolean") {
+      if (!Array.isArray(value) || !value.every(Inbox.validScope)) return
+    }
+    var next = Object.assign({}, pending)
+    next[name] = value
+    pending = next
+    Quickshell.execDetached(["omarchy-shell", "shell", "setBarWidget", moduleName, name,
+                             " " + JSON.stringify(value), "{}"])
+  }
+
+  readonly property var hiddenScopes: scopePref("hidden")
+  readonly property var focusScopes: scopePref("focus")
+  readonly property bool focusMode: pref("focusMode", false) === true
+  readonly property bool desktopNotifications: pref("desktopNotifications", false) === true
+  readonly property bool focusNarrowing: focusMode && focusScopes.length > 0
+
+  function inScope(list) { return Inbox.scoped(list, hiddenScopes, focusScopes, focusMode) }
+
+  // threadId -> updatedAt for rows dismissed here. Hides them until GitHub
+  // agrees, even if a refresh already in flight still carries them.
+  property var dismissed: Inbox.dict()
+
   // `feed` can be uninitialized during construction; an exception here would
   // leave dependent bindings permanently failed.
-  readonly property var allPrs: (feed && feed.prs) || []
-  readonly property var allReviews: (feed && feed.reviews) || []
-  readonly property var allIssues: (feed && feed.issues) || []
-  readonly property var allNotifications: (feed && feed.notifications) || []
-  readonly property var allMentions: (feed && feed.mentions) || []
-  readonly property var allClosed: (feed && feed.closed) || []
+  function rawList(name) { return (feed && feed[name]) || [] }
+  readonly property var rawNotifications: Inbox.undismissed(rawList("notifications"), dismissed)
+
+  readonly property var allPrs: inScope(rawList("prs"))
+  readonly property var allReviews: inScope(rawList("reviews"))
+  readonly property var allIssues: inScope(rawList("issues"))
+  readonly property var allNotifications: inScope(rawNotifications)
+  readonly property var allMentions: inScope(rawList("mentions"))
+  readonly property var allClosed: inScope(rawList("closed"))
   readonly property int workCount: allPrs.length + allReviews.length + allIssues.length
+
+  readonly property int rawOpenCount: Inbox.distinctCount([rawList("prs"), rawList("reviews"),
+    rawList("issues"), rawNotifications, rawList("mentions")])
+
+  // Open rows focus mode is keeping out of view, for the focus banner.
+  readonly property int focusHiddenCount: Inbox.distinctCount([Inbox.scoped(rawList("prs").concat(rawList("reviews"))
+    .concat(rawList("issues")).concat(rawNotifications).concat(rawList("mentions")), hiddenScopes, [], false)])
+    - Inbox.distinctCount([allPrs, allReviews, allIssues, allNotifications, allMentions])
 
   // GitHub has no "mention read" state, so it lives here: url -> updatedAt at
   // the moment the mention was opened. New activity on the thread re-dots it.
-  property var seen: ({})
+  property var seen: Inbox.dict()
 
   function mentionUnread(m) {
     // Your own comments/reactions never create GitHub notifications, so
     // requiring an unread one filters your own activity out of the dot.
     if (m.notifUnread !== true) return false
-    var seenAt = seen[String(m.url || "")]
+    var url = String(m.url || "")
+    var seenAt = Inbox.has(seen, url) ? seen[url] : undefined
     return !seenAt || String(m.updatedAt || "") > String(seenAt)
   }
 
+  function countUnread(list) {
+    var n = 0
+    for (var i = 0; i < list.length; i++) if (mentionUnread(list[i])) n++
+    return n
+  }
+
+  // The chip counts every org, the empty state the selected org, the
+  // section header what is on screen.
   readonly property int unreadMentions: {
     var n = 0
     for (var i = 0; i < allMentions.length; i++)
@@ -59,54 +128,452 @@ Panel {
     return n
   }
 
+  // Opening a mention: seen now, and GitHub's inbox agrees right away (the
+  // dot rule reads it). `d` goes through dismissMention and its undo window.
   function markSeen(item) {
-    // Prune to the currently listed mentions so the file never grows.
-    var next = {}
-    for (var i = 0; i < allMentions.length; i++) {
-      var url = String(allMentions[i].url || "")
-      if (seen[url]) next[url] = seen[url]
+    setSeen(String(item.url || ""), String(item.updatedAt || ""))
+    markThreadRead([item.threadId])
+  }
+
+  // value null forgets the url. Pruned to the listed mentions so the file
+  // never grows. The file watcher hands the change to the other monitors.
+  function setSeen(url, value) {
+    var next = Inbox.dict()
+    var listed = rawList("mentions")
+    for (var i = 0; i < listed.length; i++) {
+      var u = String(listed[i].url || "")
+      if (Inbox.has(seen, u) && seen[u]) next[u] = seen[u]
     }
-    next[String(item.url || "")] = String(item.updatedAt || "")
+    if (value === null || value === undefined) delete next[url]
+    else next[url] = value
     seen = next
     writeSeen(JSON.stringify(next))
-    // Keep GitHub's inbox in agreement — the dot rule reads it.
-    markThreadRead(item.threadId)
   }
 
-  // Drop the row now and mark the thread read on GitHub in the background —
-  // waiting for the next refresh would leave a read notification sitting here.
-  function dismissNotification(item) {
-    var remaining = []
-    for (var i = 0; i < allNotifications.length; i++)
-      if (allNotifications[i] !== item) remaining.push(allNotifications[i])
-    feed = {
-      user: feed.user, error: feed.error,
-      prs: allPrs, reviews: allReviews, issues: allIssues,
-      mentions: allMentions, notifications: remaining, closed: allClosed
+  // Rows leave at once and GitHub hears about each batch 5 seconds later. It
+  // has no "mark unread", so that window is the only undo there is. A batch
+  // holds dismissed notifications and mentions whose dot was cleared, keeps
+  // its own deadline (closing the panel or dismissing again never cuts it
+  // short), and is shared by every monitor's copy so `u` works from any of
+  // them. Only the copy that made a batch sends it.
+  property var undoBatches: []
+  property double undoNow: Date.now()
+
+  function instances() {
+    var items = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    if (items.indexOf(root) < 0) items = items.concat([root])
+    return items
+  }
+
+  function shareAll(name, value) {
+    var all = instances()
+    for (var i = 0; i < all.length; i++) if (all[i][name] !== undefined) all[i][name] = value
+  }
+
+  function setDismissed(next) { shareAll("dismissed", next) }
+  function setBatches(next) { shareAll("undoBatches", next) }
+
+  onUndoBatchesChanged: if (undoBatches.length > 0) { undoNow = Date.now(); undoTick.start() }
+
+  function addBatch(notes, mentions) {
+    undoNow = Date.now()
+    setBatches(undoBatches.concat([{ notes: notes, mentions: mentions, due: undoNow + 5000, owner: root }]))
+  }
+
+  function dismissNotifications(items) {
+    if (items.length === 0) return
+    var next = Inbox.copy(dismissed)
+    for (var i = 0; i < items.length; i++) next[String(items[i].threadId)] = String(items[i].updatedAt || "")
+    setDismissed(next)
+    addBatch(items.slice(), [])
+  }
+
+  // `d` on a mention: the dot clears now, GitHub hears with the batch.
+  function dismissMention(item) {
+    var url = String(item.url || "")
+    var before = Inbox.has(seen, url) ? seen[url] : undefined
+    setSeen(url, String(item.updatedAt || ""))
+    addBatch([], [{ item: item, before: before === undefined ? null : before }])
+  }
+
+  function flushDismissals() {
+    undoNow = Date.now()
+    var keep = []
+    var send = []
+    var live = instances()
+    for (var i = 0; i < undoBatches.length; i++) {
+      var b = undoBatches[i]
+      if (b.due > undoNow) { keep.push(b); continue }
+      // Another live copy sends its own batches. One whose copy is gone
+      // (monitor unplugged) is adopted, or it would never be sent.
+      if (b.owner !== root && live.indexOf(b.owner) >= 0) { keep.push(b); continue }
+      for (var j = 0; j < b.notes.length; j++) send.push(b.notes[j].threadId)
+      for (var k = 0; k < b.mentions.length; k++) send.push(b.mentions[k].item.threadId)
     }
-    markThreadRead(item.threadId)
+    if (keep.length !== undoBatches.length) setBatches(keep)
+    if (send.length > 0) markThreadRead(send)
+    if (undoBatches.length === 0) undoTick.stop()
   }
 
-  // Thread ids come from the GitHub API; the numeric check keeps anything
-  // else out of the shell command line.
-  function markThreadRead(threadId) {
-    var id = String(threadId || "")
-    if (/^[0-9]+$/.test(id) && bar)
-      bar.run("bash '" + scriptPath + "' --mark-read '" + id + "'")
+  // Undoes the most recent batch still inside its window.
+  function undoDismiss() {
+    if (undoBatches.length === 0) return
+    var last = undoBatches[undoBatches.length - 1]
+    setBatches(undoBatches.slice(0, -1))
+    restoreDismissed(last.notes.map(function(n) { return n.threadId }))
+    for (var i = 0; i < last.mentions.length; i++)
+      setSeen(String(last.mentions[i].item.url || ""), last.mentions[i].before)
+  }
+
+  function restoreDismissed(threadIds) {
+    var next = Inbox.copy(dismissed)
+    for (var i = 0; i < threadIds.length; i++) delete next[String(threadIds[i])]
+    setDismissed(next)
+  }
+
+  readonly property var lastUndo: undoBatches.length > 0 ? undoBatches[undoBatches.length - 1] : null
+  readonly property int lastUndoSize: lastUndo ? lastUndo.notes.length + lastUndo.mentions.length : 0
+
+  Timer {
+    id: undoTick
+    interval: 250
+    repeat: true
+    onTriggered: root.flushDismissals()
+  }
+
+  // Dismiss without opening: a notification is marked read, a mention loses
+  // its dot. Other rows have nothing to dismiss.
+  function dismissCursor() {
+    var row = rowAt(cursor)
+    if (!row || !row.item) return
+    if (row.notification) dismissNotifications([row.item])
+    else if (row.mention && mentionUnread(row.item)) dismissMention(row.item)
+  }
+
+  // Thread ids come from the GitHub API, and the numeric check keeps
+  // anything else off the command line. One call at a time: ids that arrive
+  // meanwhile queue for the next one. Ids GitHub refused come back on stdout
+  // and their rows return with a note in the hint line.
+  property var markQueue: []
+  property int markFailures: 0
+
+  function markThreadRead(threadIds) {
+    var ids = []
+    for (var i = 0; i < threadIds.length; i++)
+      if (/^[0-9]+$/.test(String(threadIds[i] || ""))) ids.push(String(threadIds[i]))
+    if (ids.length === 0) return
+    markQueue = markQueue.concat(ids)
+    startMark()
+  }
+
+  function startMark() {
+    if (markProcess.running || markQueue.length === 0) return
+    markProcess.command = ["bash", scriptPath, "--mark-read"].concat(markQueue)
+    markQueue = []
+    markProcess.running = true
+  }
+
+  function markFinished(text) {
+    var failed = String(text || "").split("\n").filter(function(id) { return /^[0-9]+$/.test(id) })
+    if (failed.length === 0) return
+    restoreDismissed(failed)
+    var listed = rawList("mentions")
+    for (var i = 0; i < listed.length; i++)
+      if (failed.indexOf(String(listed[i].threadId)) >= 0) setSeen(String(listed[i].url || ""), null)
+    shareAll("markFailures", markFailures + failed.length)
+  }
+
+  Process {
+    id: markProcess
+    running: false
+    onRunningChanged: if (!running) Qt.callLater(root.startMark)
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.markFinished(text)
+    }
+  }
+
+  // The refusal notice counts down only while someone can see it.
+  Timer {
+    interval: 6000
+    running: root.opened && root.markFailures > 0
+    onTriggered: root.shareAll("markFailures", 0)
+  }
+
+  // ------------------------------------------------ desktop notifications
+  //
+  // Every monitor's copy fetches, but only the first copy alerts. Keys cover
+  // all rows, not just the focused ones, so leaving focus mode does not replay
+  // what it kept quiet.
+  property var alertKeys: null
+
+  function isLeader() {
+    var items = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    return items.length === 0 || items[0] === root
+  }
+
+  // Keys come from what GitHub reports, never from local dismissal or seen
+  // state, so an undo or a refresh inside the undo window cannot replay an
+  // alert. A thread in both Notifications and Mentions alerts once.
+  function checkAlerts() {
+    var items = []
+    var notes = rawList("notifications")
+    for (var i = 0; i < notes.length; i++)
+      items.push({ key: "n" + notes[i].threadId + "@" + notes[i].updatedAt, item: notes[i], mention: false })
+    var mentions = rawList("mentions")
+    for (var j = 0; j < mentions.length; j++)
+      if (mentions[j].notifUnread === true)
+        items.push({ key: "m" + mentions[j].url + "@" + mentions[j].updatedAt, item: mentions[j], mention: true })
+    var result = Inbox.freshAlerts(alertKeys, items)
+    alertKeys = result.keys
+    if (!desktopNotifications || !isLeader()) return
+
+    var fresh = []
+    var urls = Inbox.dict()
+    for (var k = 0; k < result.fresh.length; k++) {
+      var f = result.fresh[k]
+      var url = String(f.item.url || "")
+      var shown = f.mention ? mentionUnread(f.item) : dismissed[String(f.item.threadId)] === undefined
+      if (!shown || urls[url] || inScope([f.item]).length === 0) continue
+      urls[url] = true
+      fresh.push(f)
+    }
+    if (fresh.length === 0) return
+
+    var args = []
+    if (fresh.length > 3) {
+      var titles = []
+      for (var m = 0; m < 3; m++) titles.push(String(fresh[m].item.title || ""))
+      args = ["https://github.com/notifications", fresh.length + " new on GitHub",
+              titles.join("\n") + "\n…and " + (fresh.length - 3) + " more"]
+    } else {
+      for (var n = 0; n < fresh.length; n++) {
+        var it = fresh[n].item
+        args.push(String(it.url || ""), String(it.title || ""),
+                  it.repo + " · " + (fresh[n].mention ? "mentioned you" : reasonLabel(it.reason)))
+      }
+    }
+    alertProcess.command = ["bash", notifyPath].concat(args)
+    alertProcess.running = true
+  }
+
+  Process {
+    id: alertProcess
+    running: false
+  }
+
+  // ------------------------------------------------ settings view
+  property bool settingsOpen: false
+  property bool keysOpen: false
+  // Bumped when the pointer rests on a row, so the row that was open folds.
+  property int pointerRestSerial: 0
+  signal lingerOpenRow()
+  // The legend borrows the list's scroll, so give it back on every way out.
+  property real keysScrollY: 0
+  onKeysOpenChanged: {
+    if (!panelFlick) return
+    if (keysOpen) { keysScrollY = panelFlick.contentY; panelFlick.contentY = 0; keyCatcher.forceActiveFocus() }
+    else Qt.callLater(function() { panelFlick.contentY = keysScrollY })
+  }
+  property int settingsCursor: -1
+  property var expandedOrgs: Inbox.dict()
+
+  readonly property var scopeTree: {
+    var extra = hiddenScopes.concat(focusScopes)
+    var closed = rawList("closed")
+    for (var i = 0; i < closed.length; i++) extra.push(String(closed[i].repo || ""))
+    return Inbox.scopeTree([rawList("prs"), rawList("reviews"), rawList("issues"),
+                            rawNotifications, rawList("mentions")], extra)
+  }
+
+  // Two switches, then one row per org with its repos under it when unfolded.
+  readonly property int settingsToggleCount: 2
+  readonly property var scopeRows: {
+    var rows = []
+    for (var i = 0; i < scopeTree.length; i++) {
+      var o = scopeTree[i]
+      var names = o.repos.map(function(r) { return r.repo })
+      rows.push({ kind: "org", scope: o.org, org: o.org, count: o.count, siblings: names })
+      if (expandedOrgs[o.org])
+        for (var j = 0; j < o.repos.length; j++)
+          rows.push({ kind: "repo", scope: o.repos[j].repo, org: o.org, count: o.repos[j].count, siblings: names })
+    }
+    return rows
+  }
+  readonly property int settingsRowCount: settingsToggleCount + scopeRows.length
+
+  // Effective state of a settings row. An org reads "all", "some" or "none"
+  // of its known repos, which drives the partial checkbox and target.
+  function scopeState(row) {
+    if (row.kind === "repo") {
+      var item = { org: row.org, repo: row.scope }
+      var shown = !Inbox.matches(item, hiddenScopes)
+      var focused = Inbox.matches(item, focusScopes)
+      return { hidden: shown ? "none" : "all", focus: focused ? "all" : "none", hiddenRepos: 0, focusRepos: 0 }
+    }
+    var hiddenRepos = 0
+    var focusRepos = 0
+    for (var i = 0; i < row.siblings.length; i++) {
+      var repo = { org: row.org, repo: row.siblings[i] }
+      if (Inbox.matches(repo, hiddenScopes)) hiddenRepos++
+      if (Inbox.matches(repo, focusScopes)) focusRepos++
+    }
+    return {
+      hidden: Inbox.orgState(hiddenScopes, row.org, row.siblings),
+      focus: Inbox.orgState(focusScopes, row.org, row.siblings),
+      hiddenRepos: hiddenRepos, focusRepos: focusRepos
+    }
+  }
+
+  // An org acts on what its row shows: a partly hidden org becomes fully
+  // shown, a partly focused org becomes fully focused.
+  function toggleShown(row) {
+    savePref("hidden", row.kind === "org"
+      ? Inbox.setOrg(hiddenScopes, row.org, scopeState(row).hidden === "none")
+      : Inbox.toggleRepo(hiddenScopes, row.scope))
+  }
+
+  function toggleFocus(row) {
+    savePref("focus", row.kind === "org"
+      ? Inbox.setOrg(focusScopes, row.org, scopeState(row).focus !== "all")
+      : Inbox.toggleRepo(focusScopes, row.scope))
+  }
+
+  function setExpanded(org, open) {
+    var next = Inbox.copy(expandedOrgs)
+    if (open) next[org] = true
+    else delete next[org]
+    expandedOrgs = next
+  }
+
+  // From the keyboard the cursor lands on the first switch; from a click it
+  // waits for the pointer.
+  property real inboxScrollY: 0
+
+  function openSettings(fromKeyboard) {
+    // Over the legend the list's own position is the one the legend saved.
+    if (!settingsOpen && panelFlick) inboxScrollY = keysOpen ? keysScrollY : panelFlick.contentY
+    keysOpen = false
+    // A click on the gear can come from inside the find field: take the keys
+    // back from it, or j/k would keep typing into a hidden query.
+    keyCatcher.forceActiveFocus()
+    settingsOpen = true
+    cursorFromKeyboard = fromKeyboard === true
+    cursorActive = fromKeyboard === true
+    settingsCursor = fromKeyboard === true ? 0 : -1
+    Qt.callLater(function() { if (panelFlick) panelFlick.contentY = 0 })
+  }
+
+  // Back to the inbox where it was left, cursor and scroll both.
+  function closeSettings() {
+    keysOpen = false
+    settingsOpen = false
+    Qt.callLater(function() { if (panelFlick) panelFlick.contentY = inboxScrollY })
+  }
+
+  onSettingsRowCountChanged: if (settingsCursor >= settingsRowCount) settingsCursor = settingsRowCount - 1
+
+  function moveSettingsCursor(delta) {
+    hoverGate.reset()
+    cursorFromKeyboard = true
+    cursorActive = true
+    settingsCursor = clamp(settingsCursor + delta, 0, settingsRowCount - 1)
+  }
+
+  function settingsRow(i) { return i >= settingsToggleCount ? scopeRows[i - settingsToggleCount] : null }
+
+  // Space/Enter flip the row's own switch or checkbox; f is focus everywhere.
+  function activateSettings() {
+    if (settingsCursor === 0) savePref("desktopNotifications", !desktopNotifications)
+    else if (settingsCursor === 1) savePref("focusMode", !focusMode)
+    else if (settingsRow(settingsCursor)) toggleShown(settingsRow(settingsCursor))
+  }
+
+  function focusKeyInSettings() {
+    var row = settingsRow(settingsCursor)
+    if (row) toggleFocus(row)
+    else savePref("focusMode", !focusMode)
+  }
+
+  function foldSettings(dx) {
+    var row = settingsRow(settingsCursor)
+    if (!row) return
+    if (row.kind === "org") { setExpanded(row.org, dx > 0); return }
+    if (dx < 0) {
+      // Fold from a repo: land on its org, then close it.
+      for (var i = 0; i < scopeRows.length; i++)
+        if (scopeRows[i].kind === "org" && scopeRows[i].org === row.org) settingsCursor = settingsToggleCount + i
+      setExpanded(row.org, false)
+    }
+  }
+
+  // The line under the list: what the keys do for the row under the cursor.
+  function hintText() {
+    if (lastUndo) {
+      var left = Math.max(1, Math.ceil((lastUndo.due - undoNow) / 1000))
+      var earlier = undoBatches.length - 1
+      return (lastUndoSize === 1 ? "Dismissed" : "Dismissed " + lastUndoSize)
+        + (earlier > 0 ? " · u undoes the last (" + left + "s) · " + earlier + " earlier sending"
+                       : " · u or click to undo (" + left + "s)")
+    }
+    if (keysOpen) return "? or Esc back"
+    if (settingsOpen) {
+      var srow = settingsRow(settingsCursor)
+      if (!srow) return "space toggle · j/k move · s or Esc back"
+      return "space show/hide · f focus · "
+        + (srow.kind === "org" ? (expandedOrgs[srow.org] ? "h fold" : "l repos") : "h fold")
+        + " · s back"
+    }
+    var row = cursorActive ? rowAt(cursor) : null
+    if (row && row.notification) return "↵ open · d dismiss · D dismiss all · ? keys"
+    if (row && row.mention && mentionUnread(row.item)) return "↵ open · d mark seen · ? keys"
+    return "j/k move · ↵ open · / find · s settings · ? keys"
+  }
+
+  function toggleFocusMode() {
+    savePref("focusMode", !focusMode)
   }
 
   function applySeen(text) {
     if (String(text || "").length > 262144) return
     try {
       var parsed = JSON.parse(text)
-      if (parsed && typeof parsed === "object") seen = parsed
+      if (parsed && typeof parsed === "object") seen = Inbox.copy(parsed)
     } catch (e) { /* first run: no file yet */ }
   }
 
+  // Orgs seen while the panel is open keep their tab, even after GitHub
+  // stops returning their last row, unless settings take them out of scope.
+  property var sessionOrgs: Inbox.dict()
+  onLiveOrgsChanged: {
+    var next = Inbox.copy(sessionOrgs)
+    for (var i = 0; i < liveOrgs.length; i++) next[liveOrgs[i]] = true
+    sessionOrgs = next
+  }
+
+  // Whether any repo of the org can still show: a hidden org with a
+  // "!org/repo" exception can, and focus needs the org or one of its repos.
+  function orgInScope(org) {
+    var excepted = hiddenScopes.some(function(h) { return h.indexOf("!" + org + "/") === 0 })
+    if (hiddenScopes.indexOf(org) >= 0 && !excepted) return false
+    if (!focusNarrowing) return true
+    return focusScopes.some(function(f) { return f === org || f.indexOf(org + "/") === 0 })
+  }
+
   readonly property var orgs: {
-    var seen = {}
+    var result = liveOrgs.slice()
+    for (var org in sessionOrgs)
+      if (result.indexOf(org) < 0 && orgInScope(org)) result.push(org)
+    result.sort()
+    return result
+  }
+
+  readonly property var liveOrgs: {
+    var seen = Inbox.dict()
     var result = []
-    var all = allPrs.concat(allReviews).concat(allIssues).concat(allNotifications).concat(allMentions).concat(allClosed)
+    // Raw notifications, so dismissing an org's last row keeps its tab.
+    var all = allPrs.concat(allReviews).concat(allIssues).concat(inScope(rawList("notifications")))
+      .concat(allMentions).concat(allClosed)
     for (var i = 0; i < all.length; i++) {
       var org = String(all[i].org || "")
       if (org !== "" && !seen[org]) { seen[org] = true; result.push(org) }
@@ -180,6 +647,12 @@ Panel {
     if (panelFlick) panelFlick.contentY = 0
   }
 
+  // Hiding or focusing can take the selected org tab away.
+  onOrgsChanged: if (selectedOrg !== "" && orgs.indexOf(selectedOrg) < 0) selectedOrg = ""
+
+  // Dismissing the last rows must not leave the cursor past the end.
+  onRowCountChanged: if (cursor >= rowCount) cursor = rowCount - 1
+
   onSelectedOrgChanged: {
     cursor = -1
     if (panelFlick) panelFlick.contentY = 0
@@ -236,7 +709,7 @@ Panel {
     var row = rowAt(cursor)
     if (!row || !row.item) return
     if (row.mention) markSeen(row.item)
-    if (row.notification) dismissNotification(row.item)
+    if (row.notification) dismissNotifications([row.item])
     openUrl(row.item.url)
   }
 
@@ -253,7 +726,11 @@ Panel {
                                      y + rowItem.height + padBottom - panelFlick.height)
   }
 
+  // Find lives in the inbox, so it leaves settings and scrolls to the field.
   function openSearch() {
+    keysOpen = false
+    if (settingsOpen) closeSettings()
+    Qt.callLater(function() { if (panelFlick) panelFlick.contentY = 0 })
     searchOpen = true
     Qt.callLater(function() { searchField.forceActiveFocus(); searchField.selectAll() })
   }
@@ -322,29 +799,48 @@ Panel {
       parsed = JSON.parse(text)
     } catch (e) {
       console.warn("github", "bad fetch output", e)
-      retryTimer.restart()
-      return
     }
-    if (!parsed || typeof parsed !== "object") {
-      retryTimer.restart()
-      return
-    }
+    if (!parsed || typeof parsed !== "object") parsed = { error: "Unreadable data from GitHub, retrying soon" }
     if (String(parsed.error || "") !== "") {
       // Transient failure: keep the stale lists visible, surface the error.
       // lastFetchMs stays put so "Updated Xh ago" keeps telling the truth.
-      feed = {
-        user: String(feed.user || parsed.user || ""),
-        error: String(parsed.error),
-        prs: allPrs, reviews: allReviews, issues: allIssues,
-        mentions: allMentions, notifications: allNotifications, closed: allClosed
-      }
+      var stale = Inbox.copy(feed)
+      stale.user = String(feed.user || parsed.user || "")
+      stale.error = String(parsed.error)
+      feed = stale
       retryTimer.restart()
       return
     }
+    // A refresh can add rows above the cursor: keep it on the same item, not
+    // the same row number, so the next `d` hits what the user is looking at.
+    var anchor = rowAt(cursor)
+    var anchorUrl = anchor && anchor.item ? String(anchor.item.url || "") : ""
+    var anchorKind = anchor ? (anchor.notification ? "n" : (anchor.mention ? "m" : "")) : ""
+    var anchorScope = settingsRow(settingsCursor) ? settingsRow(settingsCursor).scope : ""
     feed = parsed
+    if (anchorUrl !== "")
+      for (var r = 0; r < rowCount; r++) {
+        var row = rowAt(r)
+        var kind = row.notification ? "n" : (row.mention ? "m" : "")
+        if (row.item && String(row.item.url || "") === anchorUrl && kind === anchorKind) { cursor = r; break }
+      }
+    if (anchorScope !== "")
+      for (var q = 0; q < scopeRows.length; q++)
+        if (scopeRows[q].scope === anchorScope) { settingsCursor = settingsToggleCount + q; break }
+    // A dismissal only needs remembering while GitHub still reports the
+    // thread unread and unchanged.
+    var kept = Inbox.dict()
+    var notes = rawList("notifications")
+    for (var i = 0; i < notes.length; i++) {
+      var id = String(notes[i].threadId)
+      if (dismissed[id] !== undefined && dismissed[id] === String(notes[i].updatedAt || "")) kept[id] = dismissed[id]
+    }
+    dismissed = kept
+    checkAlerts()
     loaded = true
-    lastFetchMs = Date.now()
-    nowMs = lastFetchMs
+    // When GitHub was asked, not when the 60s cache answered.
+    lastFetchMs = typeof parsed.fetchedAt === "number" ? parsed.fetchedAt * 1000 : Date.now()
+    nowMs = Date.now()
     retryTimer.stop()
     if (selectedOrg !== "" && orgs.indexOf(selectedOrg) < 0) selectedOrg = ""
   }
@@ -354,7 +850,7 @@ Panel {
   }
 
   function footerText() {
-    if (!loaded) return "Loading…"
+    if (!loaded) return String(feed.error || "") !== "" ? "Not loaded yet" : "Loading…"
     if (lastFetchMs <= 0) return ""
     var ago = timeAgo(new Date(lastFetchMs).toISOString())
     return ago === "" ? "" : "Updated " + (ago === "now" ? "just now" : ago + " ago")
@@ -365,11 +861,17 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
+    sessionOrgs = Inbox.dict()
     cursorActive = false
     cursor = -1
+    // After the cursor reset, so no row still holds the cursor and skips it.
+    pointerRestSerial++
     cursorFromKeyboard = false
     searchOpen = false
     searchField.text = ""
+    settingsOpen = false
+    keysOpen = false
+    settingsCursor = -1
     hoverGate.reset()
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
@@ -520,6 +1022,16 @@ Panel {
       else target.open()
     }
     function refresh(): string { root.routedInstance().refreshNow(); root.refreshNow(); return "ok" }
+    function settings(): string {
+      var target = root.routedInstance()
+      target.open()
+      target.openSettings(true)
+      return "ok"
+    }
+    function focus(): string {
+      root.routedInstance().toggleFocusMode()
+      return root.routedInstance().focusMode ? "on" : "off"
+    }
     function find(): string {
       var target = root.routedInstance()
       target.open()
@@ -532,11 +1044,13 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.workCount > 0 ? " " + root.workCount : ""
+    // Focus mode swaps the octocat for a target so a quiet chip never looks
+    // like an empty inbox.
+    text: (root.focusNarrowing ? "󰓾" : "") + (root.workCount > 0 ? " " + root.workCount : "")
     active: root.allNotifications.length > 0 || root.unreadMentions > 0
     tooltipText: root.feed && String(root.feed.error || "") !== ""
       ? String(root.feed.error)
-      : root.allPrs.length + " PRs · " + root.allReviews.length + " reviews · "
+      : (root.focusNarrowing ? "Focus mode · " : "") + root.allPrs.length + " PRs · " + root.allReviews.length + " reviews · "
         + root.allIssues.length + " issues · "
         + root.allNotifications.length + " notifications"
         + (root.unreadMentions > 0 ? " · " + root.unreadMentions + " new mentions" : "")
@@ -559,7 +1073,8 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight + hintBar.implicitHeight
+      + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -567,28 +1082,106 @@ Panel {
       blocked: searchField.activeFocus
 
       onMoveRequested: function(dx, dy) {
+        // Over the legend, up and down scroll it and nothing underneath moves.
+        if (root.keysOpen) {
+          var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+          panelFlick.contentY = root.clamp(panelFlick.contentY + dy * Style.space(40), 0, maxY)
+          return
+        }
+        if (root.settingsOpen) {
+          if (dx !== 0) root.foldSettings(dx)
+          if (dy !== 0) root.moveSettingsCursor(dy)
+          return
+        }
         if (dx !== 0) {
           root.cursorActive = true
           root.selectOrg(root.selectedOrgIndex + dx)
         }
         if (dy !== 0) root.moveCursor(dy)
       }
-      onActivateRequested: root.activateCursor()
+      onActivateRequested: if (!root.keysOpen) root.settingsOpen ? root.activateSettings() : root.activateCursor()
+      onDeleteRequested: if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
       onCloseRequested: {
-        if (root.query !== "" || root.searchOpen) root.closeSearch()
+        if (root.keysOpen) root.keysOpen = false
+        else if (root.settingsOpen) root.closeSettings()
+        else if (root.query !== "" || root.searchOpen) root.closeSearch()
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.refreshNow()
+        // u, s and / still work over the legend: undo must never be blocked,
+        // and the other two leave the legend for their view.
+        if (t === "?") root.keysOpen = !root.keysOpen
+        else if (t === "u") root.undoDismiss()
+        else if (root.keysOpen && t !== "s" && !(t === "/" && !root.settingsOpen)) return
+        else if (t === "s") {
+          if (root.settingsOpen) root.closeSettings()
+          else root.openSettings(true)
+        } else if (t === "f") {
+          if (root.settingsOpen) root.focusKeyInSettings()
+          else root.toggleFocusMode()
+        } else if (root.settingsOpen) {
+          if (t === "r" || t === "R") root.refreshNow()
+        } else if (t === "d") root.dismissCursor()
+        else if (t === "D") root.dismissNotifications(root.shownNotifications)
+        else if (t === "r" || t === "R") root.refreshNow()
         else if (t === "/") root.openSearch()
         else if (t === "]") root.jumpSection(1)
         else if (t === "[") root.jumpSection(-1)
       }
 
+      Text {
+        id: failureLine
+        visible: root.markFailures > 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: hintBar.top
+        topPadding: Style.space(6)
+        text: "GitHub refused " + (root.markFailures === 1 ? "a dismissal" : root.markFailures + " dismissals")
+          + ", back in the list"
+        textFormat: Text.PlainText
+        color: root.urgent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
+      }
+
+      Text {
+        id: hintBar
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        topPadding: Style.space(8)
+        text: root.hintText()
+        textFormat: Text.PlainText
+        color: root.lastUndo ? root.foreground : root.dim
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: root.lastUndo !== null
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.undoDismiss()
+        }
+
+        MouseArea {
+          anchors.fill: parent
+          enabled: root.lastUndo === null
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.keysOpen = !root.keysOpen
+        }
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
+      }
+
       Flickable {
         id: panelFlick
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: failureLine.visible ? failureLine.top : hintBar.top
         contentWidth: width
         contentHeight: column.implicitHeight
         clip: true
@@ -606,7 +1199,8 @@ Panel {
           PanelHero {
             width: parent.width
             title: "GitHub"
-            meta: String(root.feed.user || "") !== "" ? "@" + root.feed.user : "Tasks"
+            meta: root.settingsOpen ? "Settings"
+              : (String(root.feed.user || "") !== "" ? "@" + root.feed.user : "Tasks")
             foreground: root.foreground
             fontFamily: root.fontFamily
 
@@ -632,6 +1226,17 @@ Panel {
                 }
 
                 PanelActionButton {
+                  visible: !root.settingsOpen
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: ""
+                  tooltipText: "Find (/)"
+                  foreground: root.foreground
+                  hoverColor: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.searchOpen ? root.closeSearch() : root.openSearch()
+                }
+
+                PanelActionButton {
                   anchors.verticalCenter: parent.verticalCenter
                   iconText: ""
                   tooltipText: "Refresh"
@@ -640,6 +1245,16 @@ Panel {
                   fontFamily: root.fontFamily
                   enabled: !fetchProcess.running
                   onClicked: root.refreshNow()
+                }
+
+                PanelActionButton {
+                  anchors.verticalCenter: parent.verticalCenter
+                  iconText: root.settingsOpen ? "󰅖" : "󰒓"
+                  tooltipText: root.settingsOpen ? "Back to inbox (s)" : "Settings (s)"
+                  foreground: root.foreground
+                  hoverColor: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.settingsOpen ? root.closeSettings() : root.openSettings()
                 }
               }
             }
@@ -670,20 +1285,118 @@ Panel {
             }
           }
 
-          // ---------- Organization filter ----------
-          Flow {
-            visible: root.orgs.length > 1
+          // ---------- Inbox ----------
+          Column {
+            id: inboxView
+            visible: !root.settingsOpen && !root.keysOpen
             width: parent.width
-            spacing: Style.spacing.md
+            spacing: Style.space(12)
 
-            Repeater {
+            // ---------- Focus banner ----------
+            CursorSurface {
+              id: focusBanner
+              visible: root.focusMode
+              width: parent.width
+              implicitHeight: focusBannerRow.implicitHeight + Style.spacing.rowPaddingX
+              foreground: root.foreground
+              bordered: true
+              hasCursor: focusBannerMouse.containsMouse
+
+              MouseArea {
+                id: focusBannerMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.openSettings()
+              }
+
+              Row {
+                id: focusBannerRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(10)
+
+                Text {
+                  id: focusBannerGlyph
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "󰓾"
+                  color: Color.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.heading
+                }
+
+                Column {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - focusBannerGlyph.width - leaveFocus.width - parent.spacing * 2
+                  spacing: Style.space(1)
+
+                  Text {
+                    width: parent.width
+                    text: root.focusNarrowing ? "Focus on " + Inbox.describe(root.focusScopes) : "Focus mode is on"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.focusNarrowing
+                      ? (root.focusHiddenCount > 0 ? root.focusHiddenCount + " other items waiting" : "Nothing else waiting")
+                        + " · click to edit"
+                      : "Nothing is targeted yet, so everything shows · click to choose"
+                    textFormat: Text.PlainText
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    elide: Text.ElideRight
+                  }
+                }
+
+                Button {
+                  id: leaveFocus
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Leave"
+                  tooltipText: "Leave focus mode (f)"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.spacing.xs
+                  onClicked: root.toggleFocusMode()
+                }
+              }
+            }
+
+            // ---------- Organization filter ----------
+            // One scrolling row however many orgs there are. The selected tab
+            // is kept in view, and long names are cut with the full name in
+            // the tooltip.
+            ListView {
+              id: orgTabs
+              visible: root.orgs.length > 1
+              width: parent.width
+              height: contentItem.childrenRect.height
+              orientation: ListView.Horizontal
+              spacing: Style.spacing.md
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+              interactive: contentWidth > width
               model: ["All"].concat(root.orgs)
+              currentIndex: root.selectedOrgIndex
+              highlightFollowsCurrentItem: false
+              onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
-              Button {
+              delegate: Button {
                 required property var modelData
                 required property int index
 
-                text: modelData
+                text: modelData.length > 20 ? modelData.slice(0, 19) + "…" : modelData
+                tooltipText: modelData.length > 20 ? modelData : ""
                 selected: index === root.selectedOrgIndex
                 hasCursor: root.cursorActive && root.cursor === -1 && index === root.selectedOrgIndex
                 bordered: true
@@ -698,266 +1411,646 @@ Panel {
                 onHovered: function(isHovered) { if (isHovered) root.cursorActive = true }
               }
             }
-          }
 
-          // ---------- Fuzzy find ----------
-          TextField {
-            id: searchField
-            visible: root.searchOpen
-            width: parent.width
-            placeholderText: "Fuzzy find… Enter to navigate · Esc clears"
-            font.family: root.fontFamily
-            foreground: root.foreground
-            onTextChanged: root.query = text
-            Keys.onEscapePressed: root.closeSearch()
-            Keys.onReturnPressed: root.acceptSearch()
-            Keys.onEnterPressed: root.acceptSearch()
-            Keys.onDownPressed: root.moveCursor(1)
-            Keys.onUpPressed: root.moveCursor(-1)
-          }
-
-          Text {
-            visible: root.query !== "" && root.rowCount === 0
-            width: parent.width
-            topPadding: Style.space(12)
-            text: "No matches for \"" + root.query + "\""
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-          }
-
-          Text {
-            visible: root.loaded && root.query === "" && String(root.feed.error || "") === ""
-              && root.prs.length === 0 && root.reviews.length === 0
-              && root.issues.length === 0 && root.notifications.length === 0
-            width: parent.width
-            topPadding: Style.space(24)
-            text: "Nothing on your plate.\nNo PRs, review requests, issues, or notifications."
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WordWrap
-          }
-
-          // ---------- Notifications ----------
-          PanelSeparator {
-            visible: notificationSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: notificationSection
-            visible: root.shownNotifications.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
+            // ---------- Fuzzy find ----------
+            TextField {
+              id: searchField
+              visible: root.searchOpen
               width: parent.width
-              text: "NOTIFICATIONS · " + root.shownNotifications.length
+              placeholderText: "Fuzzy find… Enter to navigate · Esc clears"
+              font.family: root.fontFamily
               foreground: root.foreground
-              fontFamily: root.fontFamily
+              onTextChanged: root.query = text
+              Keys.onEscapePressed: root.closeSearch()
+              Keys.onReturnPressed: root.acceptSearch()
+              Keys.onEnterPressed: root.acceptSearch()
+              Keys.onDownPressed: root.moveCursor(1)
+              Keys.onUpPressed: root.moveCursor(-1)
             }
 
-            Repeater {
-              model: root.shownNotifications
+            Text {
+              visible: root.query !== "" && root.rowCount === 0
+              width: parent.width
+              topPadding: Style.space(12)
+              text: "No matches for \"" + root.query + "\""
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+              elide: Text.ElideRight
+            }
 
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: notificationSection.width
-                flatIndex: root.notificationBase + index
-                notification: true
-                item: modelData
-                glyph: ""
-                glyphColor: root.urgent
-                detail: modelData.repo + " · " + root.reasonLabel(modelData.reason)
-                  + " · " + root.timeAgo(modelData.updatedAt)
+            Text {
+              visible: root.loaded && root.query === "" && String(root.feed.error || "") === ""
+                && root.prs.length === 0 && root.reviews.length === 0
+                && root.issues.length === 0 && root.notifications.length === 0
+                && root.countUnread(root.mentions) === 0
+              width: parent.width
+              topPadding: Style.space(24)
+              // Org names come from GitHub data: never parsed as markup.
+              textFormat: Text.PlainText
+              text: root.selectedOrg !== ""
+                ? "Nothing in " + root.selectedOrg + " right now."
+                : root.focusNarrowing
+                ? "Nothing in focus needs you right now."
+                  + (root.focusHiddenCount > 0 ? "\nLeave focus to see the other " + root.focusHiddenCount + " items." : "")
+                : (root.hiddenScopes.length > 0 && root.selectedOrg === "" && root.rawOpenCount > 0
+                  ? "Everything open is in hidden orgs or repos.\nPress s to show them again."
+                  : "Nothing on your plate.\nNo PRs, review requests, issues, or notifications.")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+
+            // ---------- Notifications ----------
+            PanelSeparator {
+              visible: notificationSection.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: notificationSection
+              visible: root.shownNotifications.length > 0
+              width: parent.width
+              spacing: Style.space(4)
+
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(notificationHeader.implicitHeight, dismissAll.implicitHeight)
+
+                PanelSectionHeader {
+                  id: notificationHeader
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "NOTIFICATIONS · " + root.shownNotifications.length
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+
+                Text {
+                  id: dismissAll
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: root.shownNotifications.length > 1 ? "Dismiss all " + root.shownNotifications.length : "Dismiss"
+                  color: dismissAllMouse.containsMouse ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+
+                  MouseArea {
+                    id: dismissAllMouse
+                    anchors.fill: parent
+                    anchors.margins: -Style.space(4)
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.dismissNotifications(root.shownNotifications)
+                  }
+
+                  PanelToolTip {
+                    visible: dismissAllMouse.containsMouse
+                    text: "Mark every notification shown here read on GitHub (D)"
+                    fontFamily: root.fontFamily
+                  }
+                }
+              }
+
+              Repeater {
+                model: root.shownNotifications
+
+                ItemRow {
+                  required property var modelData
+                  required property int index
+                  width: notificationSection.width
+                  flatIndex: root.notificationBase + index
+                  notification: true
+                  item: modelData
+                  glyph: ""
+                  glyphColor: root.urgent
+                  detail: modelData.repo + " · " + root.reasonLabel(modelData.reason)
+                    + " · " + root.timeAgo(modelData.updatedAt)
+                }
+              }
+            }
+
+            // ---------- Pull requests ----------
+            PanelSeparator {
+              visible: prSection.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: prSection
+              visible: root.shownPrs.length > 0
+              width: parent.width
+              spacing: Style.space(4)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "PULL REQUESTS · " + root.shownPrs.length
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.shownPrs
+
+                ItemRow {
+                  required property var modelData
+                  required property int index
+                  width: prSection.width
+                  flatIndex: root.prBase + index
+                  item: modelData
+                  glyph: ""
+                  glyphColor: modelData.draft ? root.dim : root.foreground
+                  detail: modelData.repo + "#" + modelData.number
+                    + (modelData.draft ? " · draft" : "")
+                    + " · " + root.timeAgo(modelData.updatedAt)
+                }
+              }
+            }
+
+            // ---------- Review requests ----------
+            PanelSeparator {
+              visible: reviewSection.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: reviewSection
+              visible: root.shownReviews.length > 0
+              width: parent.width
+              spacing: Style.space(4)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "REVIEW REQUESTS · " + root.shownReviews.length
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.shownReviews
+
+                ItemRow {
+                  required property var modelData
+                  required property int index
+                  width: reviewSection.width
+                  flatIndex: root.reviewBase + index
+                  item: modelData
+                  glyph: ""
+                  glyphColor: modelData.draft ? root.dim : root.foreground
+                  detail: modelData.repo + "#" + modelData.number
+                    + (modelData.draft ? " · draft" : "")
+                    + " · " + root.timeAgo(modelData.updatedAt)
+                }
+              }
+            }
+
+            // ---------- Issues ----------
+            PanelSeparator {
+              visible: issueSection.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: issueSection
+              visible: root.shownIssues.length > 0
+              width: parent.width
+              spacing: Style.space(4)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "ISSUES · " + root.shownIssues.length
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.shownIssues
+
+                ItemRow {
+                  required property var modelData
+                  required property int index
+                  width: issueSection.width
+                  flatIndex: root.issueBase + index
+                  item: modelData
+                  glyph: ""
+                  detail: modelData.repo + "#" + modelData.number + " · " + root.timeAgo(modelData.updatedAt)
+                }
+              }
+            }
+
+            // ---------- Mentions ----------
+            PanelSeparator {
+              visible: mentionSection.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: mentionSection
+              visible: root.shownMentions.length > 0
+              width: parent.width
+              spacing: Style.space(4)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "MENTIONS" + (root.countUnread(root.shownMentions) > 0 ? " · " + root.countUnread(root.shownMentions) + " NEW" : "")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.shownMentions
+
+                ItemRow {
+                  required property var modelData
+                  required property int index
+                  width: mentionSection.width
+                  flatIndex: root.mentionBase + index
+                  item: modelData
+                  glyph: "@"
+                  mention: true
+                  detail: modelData.repo + "#" + modelData.number + " · " + root.timeAgo(modelData.updatedAt)
+                }
+              }
+            }
+
+            // ---------- Recently closed ----------
+            PanelSeparator {
+              visible: closedSection.visible
+              foreground: root.foreground
+            }
+
+            Column {
+              id: closedSection
+              visible: root.shownClosed.length > 0
+              width: parent.width
+              spacing: Style.space(4)
+
+              PanelSectionHeader {
+                width: parent.width
+                text: "RECENTLY CLOSED"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Repeater {
+                model: root.shownClosed
+
+                ItemRow {
+                  required property var modelData
+                  required property int index
+                  width: closedSection.width
+                  flatIndex: root.closedBase + index
+                  item: modelData
+                  glyph: modelData.kind === "pr" ? "" : ""
+                  glyphColor: root.dim
+                  detail: modelData.repo + "#" + modelData.number
+                    + " · closed " + root.timeAgo(modelData.closedAt) + " ago"
+                }
               }
             }
           }
 
-          // ---------- Pull requests ----------
-          PanelSeparator {
-            visible: prSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: prSection
-            visible: root.shownPrs.length > 0
+          // ---------- Settings ----------
+          SettingsView {
+            visible: root.settingsOpen && !root.keysOpen
             width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "PULL REQUESTS · " + root.shownPrs.length
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.shownPrs
-
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: prSection.width
-                flatIndex: root.prBase + index
-                item: modelData
-                glyph: ""
-                glyphColor: modelData.draft ? root.dim : root.foreground
-                detail: modelData.repo + "#" + modelData.number
-                  + (modelData.draft ? " · draft" : "")
-                  + " · " + root.timeAgo(modelData.updatedAt)
-              }
-            }
           }
 
-          // ---------- Review requests ----------
-          PanelSeparator {
-            visible: reviewSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: reviewSection
-            visible: root.shownReviews.length > 0
+          // ---------- Keys ----------
+          KeysView {
+            visible: root.keysOpen
             width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "REVIEW REQUESTS · " + root.shownReviews.length
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.shownReviews
-
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: reviewSection.width
-                flatIndex: root.reviewBase + index
-                item: modelData
-                glyph: ""
-                glyphColor: modelData.draft ? root.dim : root.foreground
-                detail: modelData.repo + "#" + modelData.number
-                  + (modelData.draft ? " · draft" : "")
-                  + " · " + root.timeAgo(modelData.updatedAt)
-              }
-            }
-          }
-
-          // ---------- Issues ----------
-          PanelSeparator {
-            visible: issueSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: issueSection
-            visible: root.shownIssues.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "ISSUES · " + root.shownIssues.length
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.shownIssues
-
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: issueSection.width
-                flatIndex: root.issueBase + index
-                item: modelData
-                glyph: ""
-                detail: modelData.repo + "#" + modelData.number + " · " + root.timeAgo(modelData.updatedAt)
-              }
-            }
-          }
-
-          // ---------- Mentions ----------
-          PanelSeparator {
-            visible: mentionSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: mentionSection
-            visible: root.shownMentions.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "MENTIONS" + (root.unreadMentions > 0 ? " · " + root.unreadMentions + " NEW" : "")
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.shownMentions
-
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: mentionSection.width
-                flatIndex: root.mentionBase + index
-                item: modelData
-                glyph: "@"
-                mention: true
-                detail: modelData.repo + "#" + modelData.number + " · " + root.timeAgo(modelData.updatedAt)
-              }
-            }
-          }
-
-          // ---------- Recently closed ----------
-          PanelSeparator {
-            visible: closedSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: closedSection
-            visible: root.shownClosed.length > 0
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "RECENTLY CLOSED"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.shownClosed
-
-              ItemRow {
-                required property var modelData
-                required property int index
-                width: closedSection.width
-                flatIndex: root.closedBase + index
-                item: modelData
-                glyph: modelData.kind === "pr" ? "" : ""
-                glyphColor: root.dim
-                detail: modelData.repo + "#" + modelData.number
-                  + " · closed " + root.timeAgo(modelData.closedAt) + " ago"
-              }
-            }
           }
         }
+      }
+    }
+  }
+
+  // Every key in one place, for `?` or a click on the hint line.
+  component KeysView: Column {
+    spacing: Style.space(4)
+
+    PanelSectionHeader {
+      width: parent.width
+      text: "KEYS"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+    }
+
+    Repeater {
+      model: root.settingsOpen ? [
+        ["j k  ↓ ↑", "Move between rows"],
+        ["space  ↵", "Flip a switch, show or hide a row"],
+        ["f", "Add to focus or remove from it"],
+        ["l  →", "Show an org's repos"],
+        ["h  ←", "Fold them again"],
+        ["u", "Undo a dismissal (5 seconds)"],
+        ["r", "Refresh"],
+        ["s  Esc", "Back to the inbox"]
+      ] : [
+        ["j k  ↓ ↑", "Move between rows"],
+        ["h l  ← →", "Switch org tab"],
+        ["[ ]", "Jump between sections"],
+        ["↵", "Open in the browser"],
+        ["d  x", "Dismiss, or clear a mention dot"],
+        ["D", "Dismiss every notification shown"],
+        ["u", "Undo a dismissal (5 seconds)"],
+        ["/", "Fuzzy find"],
+        ["f", "Focus mode on or off"],
+        ["s", "Settings"],
+        ["r", "Refresh"],
+        ["Tab", "Next panel in the bar"],
+        ["Esc", "Back, then close"]
+      ]
+
+      Item {
+        required property var modelData
+        width: parent.width
+        implicitHeight: Math.max(keyText.implicitHeight, keyHelp.implicitHeight) + Style.space(6)
+
+        Text {
+          id: keyText
+          width: Style.space(90)
+          anchors.verticalCenter: parent.verticalCenter
+          text: modelData[0]
+          textFormat: Text.PlainText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+        }
+
+        Text {
+          id: keyHelp
+          anchors.left: keyText.right
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: modelData[1]
+          textFormat: Text.PlainText
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          wrapMode: Text.WordWrap
+        }
+      }
+    }
+  }
+
+  // Settings: two switches, then every org and repo the inbox has seen, each
+  // with a show/hide checkbox and a focus target.
+  component SettingsView: Column {
+    id: settingsView
+    spacing: Style.space(12)
+
+    Column {
+      width: parent.width
+      spacing: Style.space(6)
+
+      Toggle {
+        width: parent.width
+        label: "Desktop notifications"
+        description: "New notifications and mentions pop up on your desktop."
+        checked: root.desktopNotifications
+        id: alertsToggle
+        hasCursor: root.cursorActive && root.settingsCursor === 0
+        onHasCursorChanged: if (hasCursor && root.cursorFromKeyboard) root.ensureVisible(alertsToggle)
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: root.savePref("desktopNotifications", !root.desktopNotifications)
+        // Same rule as the rows: only real pointer motion takes the cursor.
+        MouseArea {
+          id: alertsToggleHover
+          anchors.fill: parent
+          hoverEnabled: true
+          acceptedButtons: Qt.NoButton
+          onPositionChanged: function(mouse) {
+            if (!hoverGate.moved(alertsToggleHover, mouse)) return
+            root.cursorFromKeyboard = false
+            root.cursorActive = true
+            root.settingsCursor = 0
+          }
+        }
+      }
+
+      Toggle {
+        width: parent.width
+        label: "Focus mode"
+        description: root.focusScopes.length === 0
+          ? "Target an org or repo below to choose what stays."
+          : "Only targeted orgs and repos show, count, and notify."
+        checked: root.focusMode
+        id: focusToggle
+        hasCursor: root.cursorActive && root.settingsCursor === 1
+        onHasCursorChanged: if (hasCursor && root.cursorFromKeyboard) root.ensureVisible(focusToggle)
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: root.savePref("focusMode", !root.focusMode)
+        // Same rule as the rows: only real pointer motion takes the cursor.
+        MouseArea {
+          id: focusToggleHover
+          anchors.fill: parent
+          hoverEnabled: true
+          acceptedButtons: Qt.NoButton
+          onPositionChanged: function(mouse) {
+            if (!hoverGate.moved(focusToggleHover, mouse)) return
+            root.cursorFromKeyboard = false
+            root.cursorActive = true
+            root.settingsCursor = 1
+          }
+        }
+      }
+    }
+
+    PanelSeparator { foreground: root.foreground }
+
+    Column {
+      width: parent.width
+      spacing: Style.space(4)
+
+      PanelSectionHeader {
+        width: parent.width
+        text: "ORGANIZATIONS AND REPOSITORIES"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+      }
+
+      Text {
+        width: parent.width
+        bottomPadding: Style.space(4)
+        text: "Uncheck to hide. Target to keep in focus mode. Numbers count open items."
+        textFormat: Text.PlainText
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        visible: root.scopeRows.length === 0
+        width: parent.width
+        topPadding: Style.space(8)
+        text: root.loaded ? "No orgs yet. They appear here as GitHub activity arrives."
+          : (String(root.feed.error || "") !== "" ? "Orgs appear here once GitHub answers." : "Loading…")
+        textFormat: Text.PlainText
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+      }
+
+      Repeater {
+        model: root.scopeRows
+
+        ScopeRow {
+          required property var modelData
+          required property int index
+          width: settingsView.width
+          entry: modelData
+          flatIndex: root.settingsToggleCount + index
+        }
+      }
+    }
+  }
+
+  // One org or repo: fold chevron, show/hide checkbox, name, open count, and
+  // the focus target. Repo changes under an org rule are stored as
+  // exceptions (Inbox.toggleRepo), so the org rule keeps covering new repos.
+  component ScopeRow: CursorSurface {
+    id: scopeRow
+    property var entry: ({})
+    property int flatIndex: -1
+
+    readonly property bool isOrg: entry.kind === "org"
+    readonly property var st: root.scopeState(entry)
+    readonly property bool expanded: isOrg && root.expandedOrgs[entry.org] === true
+
+    hasCursor: root.cursorActive && root.settingsCursor === flatIndex
+    foreground: root.foreground
+    implicitHeight: scopeContent.implicitHeight + Style.spacing.rowPaddingX
+    onHasCursorChanged: if (hasCursor && root.cursorFromKeyboard) root.ensureVisible(scopeRow)
+
+    function hover(mouse, area) {
+      if (!hoverGate.moved(area, mouse)) return
+      root.cursorFromKeyboard = false
+      root.cursorActive = true
+      root.settingsCursor = scopeRow.flatIndex
+    }
+
+    MouseArea {
+      id: scopeMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onPositionChanged: function(mouse) { scopeRow.hover(mouse, scopeMouse) }
+      // Like any tree: a click on an org folds it, the checkbox hides it.
+      onClicked: {
+        if (scopeRow.isOrg && scopeRow.entry.siblings.length > 0) root.setExpanded(scopeRow.entry.org, !scopeRow.expanded)
+        else root.toggleShown(scopeRow.entry)
+      }
+    }
+
+    Item {
+      id: scopeContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(scopeRow.isOrg ? 4 : 30)
+      anchors.rightMargin: Style.space(4)
+      implicitHeight: Math.max(chevron.implicitHeight, focusButton.implicitHeight, scopeName.implicitHeight)
+
+      PanelActionButton {
+        id: chevron
+        visible: scopeRow.isOrg
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: scopeRow.expanded ? "󰅀" : "󰅂"
+        tooltipText: scopeRow.expanded ? "Fold (h)" : "Show repos (l)"
+        enabled: scopeRow.entry.siblings && scopeRow.entry.siblings.length > 0
+        foreground: root.dim
+        hoverColor: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: root.setExpanded(scopeRow.entry.org, !scopeRow.expanded)
+      }
+
+      Text {
+        id: checkbox
+        anchors.left: scopeRow.isOrg ? chevron.right : parent.left
+        anchors.leftMargin: Style.space(4)
+        anchors.verticalCenter: parent.verticalCenter
+        // Partial when only some of the org's repos are hidden.
+        text: scopeRow.st.hidden === "none" ? "󰄲" : (scopeRow.st.hidden === "some" ? "󰡖" : "󰄱")
+        color: scopeRow.st.hidden === "all" ? root.dim : root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.heading
+
+        MouseArea {
+          anchors.fill: parent
+          anchors.margins: -Style.space(4)
+          cursorShape: Qt.PointingHandCursor
+          onClicked: root.toggleShown(scopeRow.entry)
+        }
+      }
+
+      Text {
+        id: scopeName
+        anchors.left: checkbox.right
+        anchors.leftMargin: Style.space(10)
+        anchors.right: scopeMeta.left
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        // Repos drop the org prefix: the org row right above already says it.
+        text: scopeRow.isOrg ? scopeRow.entry.scope : scopeRow.entry.scope.split("/")[1]
+        textFormat: Text.PlainText
+        color: scopeRow.st.hidden === "all" ? root.dim : root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.strikeout: scopeRow.st.hidden === "all"
+        elide: Text.ElideRight
+
+        PanelToolTip {
+          visible: scopeName.truncated && scopeMouse.containsMouse
+          text: scopeRow.entry.scope
+          fontFamily: root.fontFamily
+        }
+      }
+
+      Text {
+        id: scopeMeta
+        anchors.right: focusButton.left
+        anchors.rightMargin: Style.space(6)
+        anchors.verticalCenter: parent.verticalCenter
+        text: {
+          var parts = []
+          if (scopeRow.st.hidden === "some") parts.push(scopeRow.st.hiddenRepos + " hidden")
+          if (scopeRow.st.focus === "some") parts.push(scopeRow.st.focusRepos + " in focus")
+          if (scopeRow.st.focus === "all") parts.push("in focus")
+          if (scopeRow.entry.count > 0) parts.push(String(scopeRow.entry.count))
+          return parts.join(" · ")
+        }
+        textFormat: Text.PlainText
+        color: scopeRow.st.focus === "none" ? root.dim : Color.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      PanelActionButton {
+        id: focusButton
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: "󰓾"
+        tooltipText: scopeRow.st.focus === "all" ? "Remove from focus (f)"
+          : (scopeRow.isOrg ? "Focus on the whole org (f)" : "Add to focus (f)")
+        foreground: scopeRow.st.focus === "all" ? Color.accent
+          : (scopeRow.st.focus === "some" ? root.alpha(Color.accent, 0.6) : root.alpha(root.dim, 0.55))
+        hoverColor: scopeRow.st.focus === "none" ? root.foreground : Color.accent
+        fontFamily: root.fontFamily
+        onClicked: root.toggleFocus(scopeRow.entry)
       }
     }
   }
@@ -974,32 +2067,100 @@ Panel {
     property int flatIndex: -1
 
     readonly property bool dotted: mention && item && root.mentionUnread(item)
+    readonly property bool dismissable: notification || dotted
+
+    // Right-click dismisses without opening, like an Omarchy toast.
+    function dismiss() {
+      var it = row.item
+      if (!it) return
+      if (row.notification) root.dismissNotifications([it])
+      else if (row.dotted) root.dismissMention(it)
+    }
 
     hasCursor: root.cursorActive && root.cursor === flatIndex
     foreground: root.foreground
 
-    // Only keyboard cursor moves scroll — hover must never yank the list.
-    onHasCursorChanged: if (hasCursor && root.cursorFromKeyboard) root.ensureVisible(row)
+    // The selected row unfolds to its full title. From the keyboard that is
+    // immediate. Under the pointer nothing changes size mid-sweep: the row
+    // unfolds once the pointer has rested on it for 350 ms, and the row that
+    // was open stays open ("lingering") until then, so both change in the
+    // same moment and nothing moves while the pointer travels.
+    property bool rested: false
+    property bool lingering: false
+    readonly property bool expanded: (hasCursor && (root.cursorFromKeyboard || rested)) || lingering
+
+    Timer {
+      id: restTimer
+      interval: 350
+      onTriggered: {
+        row.rested = true
+        root.pointerRestSerial++
+      }
+    }
+
+    // Every real pointer move inside the row restarts the wait, so it
+    // measures rest, not time since the row was selected.
+    function pointerMoved() {
+      if (!rested) restTimer.restart()
+    }
+
+    Connections {
+      target: root
+      function onPointerRestSerialChanged() { if (!row.hasCursor) row.lingering = false }
+      function onLingerOpenRow() { if (row.expanded) row.lingering = true }
+      function onCursorFromKeyboardChanged() { if (root.cursorFromKeyboard) { row.lingering = false; restTimer.stop() } }
+    }
+
+    // Only keyboard cursor moves scroll: hover must never yank the list.
+    onHasCursorChanged: {
+      if (!hasCursor && expanded && !root.cursorFromKeyboard) lingering = true
+      rested = false
+      restTimer.stop()
+      if (hasCursor && root.cursorFromKeyboard) root.ensureVisible(row)
+    }
+
+    // A row above the pointer that folds would pull the hovered row up:
+    // scroll by the same amount so it stays put when the list allows it.
+    property real lastHeight: 0
+    onHeightChanged: {
+      var delta = height - lastHeight
+      lastHeight = height
+      if (hasCursor && root.cursorFromKeyboard) root.ensureVisible(row)
+      else if (!hasCursor && !root.cursorFromKeyboard && delta < 0 && flatIndex < root.cursor && panelFlick)
+        panelFlick.contentY = Math.max(0, panelFlick.contentY + delta)
+    }
 
     implicitHeight: rowContent.implicitHeight + Style.spacing.rowPaddingX
+    clip: true
+    Behavior on implicitHeight {
+      NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+    }
 
     MouseArea {
       id: rowMouse
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
       onPositionChanged: function(mouse) {
         if (!hoverGate.moved(rowMouse, mouse)) return
+        // Handing over from the keyboard: the row it opened stays open as
+        // lingering, so the switch itself moves nothing.
+        if (root.cursorFromKeyboard) root.lingerOpenRow()
         root.cursorFromKeyboard = false
         root.cursorActive = true
         root.cursor = row.flatIndex
+        row.pointerMoved()
       }
-      onClicked: {
+      // Leaving before the rest is up cancels the unfold.
+      onExited: if (!row.rested) restTimer.stop()
+      onClicked: function(mouse) {
+        if (mouse.button === Qt.RightButton) { row.dismiss(); return }
         // Dismissal rebuilds the Repeater and can destroy this row mid-handler.
         var it = row.item
         if (!it) return
         if (row.mention) root.markSeen(it)
-        if (row.notification) root.dismissNotification(it)
+        if (row.notification) root.dismissNotifications([it])
         root.openUrl(it.url)
       }
     }
@@ -1023,9 +2184,22 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
       }
 
+      PanelActionButton {
+        id: dismissButton
+        visible: row.dismissable && row.hasCursor
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: "󰅖"
+        tooltipText: row.notification ? "Dismiss (d or right-click)" : "Mark seen (d or right-click)"
+        foreground: root.dim
+        hoverColor: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: row.dismiss()
+      }
+
       Rectangle {
         id: unreadDot
-        visible: row.dotted
+        visible: row.dotted && !dismissButton.visible
         width: Style.space(7)
         height: width
         radius: width / 2
@@ -1039,8 +2213,8 @@ Panel {
         spacing: Style.space(1)
         anchors.left: rowGlyph.right
         anchors.leftMargin: Style.space(10)
-        anchors.right: unreadDot.visible ? unreadDot.left : parent.right
-        anchors.rightMargin: unreadDot.visible ? Style.space(8) : 0
+        anchors.right: dismissButton.visible ? dismissButton.left : (unreadDot.visible ? unreadDot.left : parent.right)
+        anchors.rightMargin: dismissButton.visible || unreadDot.visible ? Style.space(8) : 0
         anchors.verticalCenter: parent.verticalCenter
 
         Text {
@@ -1051,6 +2225,9 @@ Panel {
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
+          // The selected row shows its whole title.
+          wrapMode: row.expanded ? Text.Wrap : Text.NoWrap
+          maximumLineCount: row.expanded ? 4 : 1
           elide: Text.ElideRight
           width: parent.width
         }

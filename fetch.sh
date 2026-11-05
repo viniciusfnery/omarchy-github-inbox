@@ -11,10 +11,16 @@ closed_days=30
 
 while (( $# > 0 )); do
   case "$1" in
-  # The cache drop keeps the next refresh from resurrecting the dismissed row.
+  # The cache drop keeps the next refresh from resurrecting the dismissed rows.
+  # Ids reach the API path, so anything but digits is skipped. Ids GitHub
+  # refused are printed so the panel can put those rows back.
   --mark-read)
     rm -f "$cache"
-    [[ -n ${2:-} ]] && gh api --method PATCH "notifications/threads/$2" >/dev/null 2>&1
+    shift
+    for id in "$@"; do
+      [[ $id =~ ^[0-9]+$ ]] || continue
+      gh api --method PATCH "notifications/threads/$id" >/dev/null 2>&1 || echo "$id"
+    done
     exit 0
     ;;
   --mentions)
@@ -53,8 +59,9 @@ gh auth status >/dev/null 2>&1 || fail "Not signed in: run gh auth login"
 user=$(gh api user --jq .login 2>/dev/null) || fail "GitHub API unreachable"
 
 # gh api prints error bodies to stdout on HTTP failures, so exit codes alone
-# cannot be trusted — only pass through actual JSON arrays.
-as_array() { jq -e 'type == "array"' >/dev/null 2>&1 <<<"$1" && echo "$1" || echo '[]'; }
+# cannot be trusted: only actual JSON arrays pass, anything else is "null"
+# and fails the whole refresh below.
+as_array() { jq -e 'type == "array"' >/dev/null 2>&1 <<<"$1" && echo "$1" || echo null; }
 
 search() { as_array "$(gh api "search/issues?q=$1&sort=updated&order=desc&per_page=$2" --jq '.items' 2>/dev/null)"; }
 
@@ -73,6 +80,13 @@ closed_issues=$(search "is:closed+is:issue+assignee:@me+archived:false" 20)
 # silently when they close (the mentions section is open-only).
 closed_mentions=$(search "is:closed+mentions:@me+archived:false" 20)
 notifications=$(as_array "$(gh api "notifications?per_page=50" 2>/dev/null)")
+
+# One failed request (usually the search rate limit) would otherwise pass for
+# an empty section. An error record keeps the panel on its last good data.
+for list in "$authored" "$assigned" "$reviews" "$issues" "$mentions" \
+  "$closed_prs" "$closed_issues" "$closed_mentions" "$notifications"; do
+  [[ $list == null ]] && fail "GitHub API error or rate limit, retrying soon"
+done
 
 # Blobs go in as files (--slurpfile), never argv: a large notification set
 # once blew past the kernel's 128KB per-argument limit (E2BIG).
@@ -106,9 +120,12 @@ def notifUrl:
 # notifications, so this lets the mention dots ignore your own activity.
 ($notifications[0] | map({key: notifUrl, value: (.id | tostring)}) | from_entries) as $threadByUrl |
 
+([$mentions[0][].html_url]) as $mentionUrls |
+
 {
   user: $user,
   error: "",
+  fetchedAt: (now | floor),
   prs: (($authored[0] + $assigned[0]) | unique_by(.id) | map(item) | ghOnly | sort_by(.updatedAt) | reverse),
   reviews: ($reviews[0] | map(item) | ghOnly | sort_by(.updatedAt) | reverse),
   issues: ($issues[0] | map(item) | ghOnly | sort_by(.updatedAt) | reverse),
@@ -121,9 +138,11 @@ def notifUrl:
     | ghOnly | unique_by(.url)
     | map(select((.closedAt | fromdateiso8601? // 0) > (now - $closedDays * 86400)))
     | sort_by(.closedAt) | reverse),
-  # The mentions section owns mention events; team mentions stay because the
-  # mentions search cannot see them.
-  notifications: ($notifications[0] | map(select(.reason != "mention")) | map({
+  # The mentions section owns the mention events it lists. Any other mention
+  # (team mentions, closed threads) stays here, or nothing would show it.
+  notifications: ($notifications[0]
+    | map(select(.reason != "mention" or ((notifUrl) as $u | $mentionUrls | index($u) | not)))
+    | map({
     threadId: (.id | tostring),
     title: .subject.title,
     type: .subject.type,

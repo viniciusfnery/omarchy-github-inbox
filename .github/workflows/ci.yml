@@ -16,10 +16,10 @@ jobs:
           persist-credentials: false
 
       - name: Syntax check
-        run: bash -n fetch.sh tests/run.sh tests/bin/gh
+        run: bash -n fetch.sh notify.sh tests/run.sh tests/bin/*
 
       - name: Shellcheck
-        run: shellcheck -S error fetch.sh tests/run.sh tests/bin/gh
+        run: shellcheck -S error fetch.sh notify.sh tests/run.sh tests/bin/*
 
       - name: Manifest sanity
         run: |

@@ -1,0 +1,4 @@
+#!/bin/bash
+# Fake browser launcher: logs the URL it was asked to open.
+[[ -n ${FAKE_GH_LOG:-} ]] && printf 'browser %s\n' "$*" >>"$FAKE_GH_LOG"
+exit 0
