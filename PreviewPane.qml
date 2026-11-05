@@ -12,6 +12,8 @@ Item {
   required property var inbox
   // Which side of the list the pane sits on: its divider goes between them.
   property bool onLeft: false
+  // Alone in the panel on a narrow screen: no divider.
+  property bool solo: false
   // Full data once gh answers. Before that, the row's own title and number,
   // so the pane is never empty while it loads.
   readonly property bool full: inbox.previewData !== null
@@ -72,14 +74,19 @@ Item {
       para = []
     }
     for (var i = 0; i < lines.length && blocks.length < 12; i++) {
-      // Table rows read as "a · b · c"; the |---| rule under the head goes.
-      if (/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) continue
-      if (/^\s*\|.*\|\s*$/.test(lines[i]))
-        lines[i] = lines[i].trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · ")
-      var m = /^#{1,6}\s+(.*)$/.exec(lines[i])
+      var line = lines[i].replace(/`([^`]+)`/g, "$1").replace(/^(\s*)[-*]\s+/, "$1• ")
+      // Each table row is its own block, "a · b · c"; the |---| rule goes.
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue
+      // A row the 1200-character cut ended early has no closing pipe.
+      if (/^\s*\|/.test(line)) {
+        flush()
+        blocks.push({ heading: false, text: line.trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · ") })
+        continue
+      }
+      var m = /^#{1,6}\s+(.*)$/.exec(line)
       if (m) { flush(); blocks.push({ heading: true, text: m[1].replace(/(\*\*|__)(.+?)\1/g, "$2").trim() }) }
-      else if (lines[i].trim() === "") flush()
-      else para.push(lines[i])
+      else if (line.trim() === "") flush()
+      else para.push(line)
     }
     flush()
     return blocks.slice(0, 12)
@@ -95,6 +102,7 @@ Item {
   }
 
   Rectangle {
+    visible: !pane.solo
     x: pane.onLeft ? parent.width + Style.space(6) : -Style.space(7)
     anchors.top: parent.top
     anchors.bottom: parent.bottom
@@ -251,7 +259,7 @@ Item {
           glyph: r === "APPROVED" ? "" : (r === "CHANGES_REQUESTED" ? "" : "")
           tone: r === "CHANGES_REQUESTED" ? pane.inbox.urgent : (r === "APPROVED" ? pane.inbox.foreground : pane.inbox.dim)
           text: r === "APPROVED" ? "Approved" : (r === "CHANGES_REQUESTED" ? "Changes requested"
-            : (r === "REVIEW_REQUIRED" ? "Review required" : "No review needed"))
+            : (r === "REVIEW_REQUIRED" ? "Review required" : "No required reviews"))
         }
 
         StatusLine {
@@ -326,6 +334,7 @@ Item {
 
       // Markdown headings become bold lines; everything stays PlainText.
       Repeater {
+        id: bodyRepeater
         model: pane.full ? pane.bodyBlocks : []
 
         Text {
@@ -342,6 +351,19 @@ Item {
           maximumLineCount: modelData.heading ? 2 : 8
           elide: Text.ElideRight
         }
+      }
+
+      // The description is cut at 1200 characters: say so, and where the rest is.
+      Text {
+        visible: pane.full && String(pane.d.body || "").slice(-1) === "…"
+        width: parent.width
+        text: "Only the start is shown. Enter opens the full description."
+        textFormat: Text.PlainText
+        color: pane.inbox.dim
+        font.family: pane.inbox.fontFamily
+        font.pixelSize: Style.font.caption
+        font.italic: true
+        wrapMode: Text.WordWrap
       }
 
       // ---------- Comments ----------
@@ -438,13 +460,40 @@ Item {
     anchors.bottom: parent.bottom
     anchors.rightMargin: Style.space(8)
     spacing: Style.space(8)
-    visible: pane.d !== null
+    visible: pane.d !== null || pane.inbox.previewError !== ""
 
     // Where the scrolling content is cut, so the cut reads as an edge.
     Rectangle {
       width: parent.width
       height: 1
       color: pane.inbox.alpha(pane.inbox.foreground, 0.12)
+    }
+
+    // Old data on screen after a failed refresh, or no data at all.
+    Row {
+      visible: pane.inbox.previewStale || (!pane.full && pane.inbox.previewError !== "")
+      spacing: Style.space(8)
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        text: pane.inbox.previewStale ? "Could not refresh, this may be out of date" : "Could not load this preview"
+        textFormat: Text.PlainText
+        color: pane.inbox.urgent
+        font.family: pane.inbox.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+
+      Button {
+        anchors.verticalCenter: parent.verticalCenter
+        text: "Retry"
+        tooltipText: "r"
+        bordered: true
+        foreground: pane.inbox.foreground
+        fontFamily: pane.inbox.fontFamily
+        fontSize: Style.font.caption
+        verticalPadding: Style.spacing.xs
+        onClicked: pane.inbox.reloadPreview()
+      }
     }
 
     Text {
@@ -550,8 +599,9 @@ Item {
 
         Text {
           width: parent.width
-          text: pane.d && pane.isPr ? ({ squash: "Squash and merge", merge: "Merge", rebase: "Rebase and merge" })[pane.inbox.mergeMethod]
-            + " #" + pane.d.number + " into " + pane.d.base + "?" : ""
+          text: pane.inbox.mergeTarget ? ({ squash: "Squash and merge", merge: "Merge", rebase: "Rebase and merge" })[pane.inbox.mergeMethod]
+            + " #" + pane.inbox.mergeTarget.number + " into " + pane.inbox.mergeTarget.base
+            + " at " + pane.inbox.mergeTarget.sha.slice(0, 7) + "?" : ""
           textFormat: Text.PlainText
           color: pane.inbox.foreground
           font.family: pane.inbox.fontFamily
@@ -585,6 +635,7 @@ Item {
 
           Button {
             text: pane.inbox.actionBusy ? "Merging…" : "Confirm merge"
+            focusable: false
             tooltipText: "Enter"
             bordered: true
             enabled: !pane.inbox.actionBusy
@@ -608,8 +659,9 @@ Item {
       }
     }
 
-    Row {
+    Flow {
       visible: pane.inbox.previewMode === ""
+      width: parent.width
       spacing: Style.space(8)
 
       Button {
@@ -619,7 +671,7 @@ Item {
         foreground: pane.inbox.foreground
         fontFamily: pane.inbox.fontFamily
         fontSize: Style.font.bodySmall
-        onClicked: pane.inbox.openUrl(pane.inbox.previewUrl)
+        onClicked: pane.inbox.openPreviewed()
       }
 
       Button {
@@ -635,7 +687,7 @@ Item {
 
       Button {
         visible: pane.isPr
-        enabled: pane.full
+        enabled: pane.full && pane.inbox.mergeBlock === ""
         text: "Merge"
         tooltipText: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m"
         bordered: true
@@ -662,12 +714,15 @@ Item {
 
   // One status line: glyph and text in a tone.
   component StatusLine: Row {
+    id: statusLine
     property string glyph: ""
     property string text: ""
     property color tone: pane.inbox.foreground
+    width: content.width
     spacing: Style.space(8)
 
     Text {
+      id: statusGlyph
       text: parent.glyph
       textFormat: Text.PlainText
       color: parent.tone
@@ -676,11 +731,13 @@ Item {
     }
 
     Text {
+      width: statusLine.width - statusGlyph.width - statusLine.spacing
       text: parent.text
       textFormat: Text.PlainText
       color: parent.tone
       font.family: pane.inbox.fontFamily
       font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
     }
   }
 }

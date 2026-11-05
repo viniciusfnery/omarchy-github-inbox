@@ -83,7 +83,7 @@ fresh_env() {
   export PATH="$TESTS_DIR/bin:$BASE_PATH"
   export FAKE_GH_FIXTURES="$TMP/fixtures"
   export FAKE_GH_LOG="$TMP/gh.log"
-  unset FAKE_GH_AUTH_FAIL FAKE_GH_API_FAIL FAKE_GH_PATCH_FAIL FAKE_NOTIFY_ACTION
+  unset FAKE_GH_AUTH_FAIL FAKE_GH_API_FAIL FAKE_GH_PATCH_FAIL FAKE_NOTIFY_ACTION FAKE_GH_COMMENT_FAIL FAKE_GH_PREVIEW_FAIL
   mkdir -p "$HOME" "$XDG_CACHE_HOME" "$FAKE_GH_FIXTURES"
   : >"$FAKE_GH_LOG"
   write_fixtures "$FAKE_GH_FIXTURES"
@@ -293,6 +293,25 @@ fresh_env
 out=$(head -c 30000 /dev/zero | tr '\0' 'x' | sed 's/x/あ/g' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
 t "preview: a comment over 64KB in bytes is refused, never truncated" \
   "$([[ $(jq -r '.error' <<<"$out") == "Comment too long" ]] && ! grep -q 'comment' "$FAKE_GH_LOG" && echo true || echo false)"
+
+# The limit counts the raw bytes read. $(...) would drop the newline at
+# byte 65537, letting 64KB plus a tail pass as exactly 64KB, cut short.
+fresh_env
+out=$({ head -c 65536 /dev/zero | tr '\0' a; printf '\nDO NOT DROP THIS END'; } | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
+t "preview: 64KB plus a newline and more is refused, not cut at the newline" \
+  "$([[ $(jq -r '.error' <<<"$out") == "Comment too long" ]] && ! grep -q 'comment' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+printf 'keep\n\n' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issues/3" >/dev/null
+t "preview: an accepted comment keeps its trailing newlines" \
+  "$(grep -qx 'stdin-bytes: 6' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+export FAKE_GH_COMMENT_FAIL=1
+out=$(printf 'hi' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issues/3" 2>&1)
+unset FAKE_GH_COMMENT_FAIL
+t "preview: a huge gh error still comes back as one bounded JSON error" \
+  "$(jqt '(.error | startswith("GitHub refused the comment")) and (.error | length) <= 2000' "$out")"
 
 fresh_env
 pr_fixture 140000

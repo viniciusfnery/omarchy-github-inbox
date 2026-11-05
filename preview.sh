@@ -9,7 +9,9 @@
 # never another host or something gh would read as a flag.
 export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"
 
-fail() { jq -n --arg e "$1" '{error: $e}'; exit 0; }
+# The message goes to jq on stdin, bounded: GitHub error text never becomes
+# an argument (visible to other users, and capped by the kernel).
+fail() { printf '%s' "${1:0:2000}" | jq -Rs '{error: .}'; exit 0; }
 command -v jq >/dev/null || { echo '{"error":"jq not found"}'; exit 0; }
 command -v gh >/dev/null || fail "GitHub CLI (gh) not found"
 
@@ -85,7 +87,10 @@ view)
 comment)
   # The limit is in bytes, like the read: counting characters would let a
   # long non-ASCII comment through cut short.
-  body=$(head -c 65537)
+  # The x keeps $(...) from dropping trailing newlines, so the byte count
+  # is of exactly what was read, and what is posted is exactly what was typed.
+  body=$(head -c 65537; printf x)
+  body=${body%x}
   [[ -n ${body//[[:space:]]/} ]] || fail "Empty comment"
   (( $(printf '%s' "$body" | wc -c) <= 65536 )) || fail "Comment too long"
   err=$(printf '%s' "$body" | gh "$kind" comment "$url" --body-file - 2>&1 >/dev/null) ||

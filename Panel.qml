@@ -537,6 +537,11 @@ Panel {
   property bool paneOnLeft: true
   property real listWidth: Style.space(400)
 
+  // Both columns need about 852 units. On a screen too narrow for that the
+  // pane takes the panel on its own, and p or Esc goes back to the list.
+  readonly property bool paneFits: panel.availableCardWidth <= 0 || panel.availableCardWidth >= Style.space(852)
+  readonly property bool paneSolo: previewOpen && !paneFits
+
   function pickPaneSide() {
     var w = panel.screenW
     paneOnLeft = w <= 0 || panel.anchorScreenPos.x + panel.anchorW / 2 > w / 2
@@ -553,6 +558,9 @@ Panel {
     var row = rowAt(cursor)
     return row && row.item && previewableUrl(row.item.url) ? String(row.item.url) : ""
   }
+
+  // Back from comment or merge: catch up with the cursor if it moved.
+  onPreviewModeChanged: if (previewMode === "" && previewOpen && !actionBusy && cursorUrl !== "" && cursorUrl !== previewUrl) previewDebounce.restart()
 
   function togglePreview() {
     if (previewOpen) closePreview()
@@ -578,7 +586,7 @@ Panel {
   // so `p` usually opens on a cache hit.
   onCursorUrlChanged: {
     if (cursorUrl === "" || !opened) return
-    if (previewOpen && previewMode === "") {
+    if (previewOpen && previewMode === "" && !actionBusy) {
       if (cachedPreview(cursorUrl, 300000)) showPreview(cursorUrl)
       else previewDebounce.restart()
     } else if (!previewOpen) {
@@ -588,7 +596,7 @@ Panel {
   Timer {
     id: previewDebounce
     interval: 120
-    onTriggered: root.showPreview(root.cursorUrl)
+    onTriggered: if (root.previewMode === "" && !root.actionBusy) root.showPreview(root.cursorUrl)
   }
   Timer {
     id: prefetchTimer
@@ -610,7 +618,27 @@ Panel {
 
   // Up to five minutes old shows at once. Older than a minute it is
   // refreshed in the background and replaced when the answer lands.
+  property bool previewStale: false
+  property int unknownRetries: 0
+  Timer {
+    id: unknownRetryTimer
+    interval: 3000
+    onTriggered: if (root.previewOpen && root.previewMode === "") root.reloadPreview()
+  }
+
+  // Ask GitHub again for the item on screen, ignoring the cache.
+  function reloadPreview() {
+    if (previewUrl === "" || actionBusy) return
+    var next = Inbox.copy(previewCache)
+    delete next[previewUrl]
+    previewCache = next
+    previewLoading = true
+    loadPreview()
+  }
+
   function showPreview(url) {
+    if (url !== previewUrl) unknownRetries = 0
+    previewStale = false
     previewUrl = url
     previewNotice = ""
     previewMode = ""
@@ -634,8 +662,14 @@ Panel {
   // of the visible pane's own fetch.
   property var prefetchQueue: []
 
+  // A URL that just failed waits a minute, and background fetches start at
+  // most every 800 ms, so a failing row cannot be hammered by j/k.
+  property var failedAt: Inbox.dict()
+  property double lastPrefetchAt: 0
+
   function prefetch(url) {
     if (!previewableUrl(url) || cachedPreview(url, 60000)) return
+    if (Inbox.has(failedAt, url) && Date.now() - failedAt[url] < 60000) return
     if ((prefetchProcess.running && prefetchProcess.requested === url) || prefetchQueue.indexOf(url) >= 0) return
     if (previewProcess.running && previewProcess.requested === url) return
     prefetchQueue = prefetchQueue.concat([url]).slice(-3)
@@ -644,44 +678,62 @@ Panel {
 
   function runPrefetch() {
     if (prefetchProcess.running || previewProcess.running || prefetchQueue.length === 0) return
+    var wait = 800 - (Date.now() - lastPrefetchAt)
+    if (wait > 0) { prefetchCadence.interval = wait; prefetchCadence.restart(); return }
+    lastPrefetchAt = Date.now()
     var url = prefetchQueue[0]
     prefetchQueue = prefetchQueue.slice(1)
     if (cachedPreview(url, 60000)) { Qt.callLater(runPrefetch); return }
     prefetchProcess.requested = url
+    prefetchProcess.startedAt = Date.now()
     prefetchProcess.command = ["bash", previewPath, "view", url]
     prefetchProcess.running = true
+  }
+
+  Timer {
+    id: prefetchCadence
+    onTriggered: root.runPrefetch()
   }
 
   Process {
     id: prefetchProcess
     property string requested: ""
+    property double startedAt: 0
     running: false
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyPreview(text, prefetchProcess.requested)
+      onStreamFinished: root.applyPreview(text, prefetchProcess.requested, prefetchProcess.startedAt)
     }
     onRunningChanged: if (!running) Qt.callLater(root.runPrefetch)
   }
 
-  // One gh call at a time. A cursor that moved on while it ran gets its own
-  // call as soon as this one ends, and the stale answer only fills the cache.
-  // A background fetch already running for this URL is simply awaited.
+  // One visible fetch at a time, beside at most one background fetch. A
+  // cursor that moved on while it ran gets its own call as soon as this one
+  // ends, and the stale answer only fills the cache. A background fetch
+  // already running for this URL is simply awaited.
   function loadPreview() {
     if (previewUrl === "") return
     if (prefetchProcess.running && prefetchProcess.requested === previewUrl) return
     if (previewProcess.running) return
     previewProcess.requested = previewUrl
+    previewProcess.startedAt = Date.now()
     previewProcess.command = ["bash", previewPath, "view", previewUrl]
     previewProcess.running = true
   }
 
-  function applyPreview(text, url) {
+  function applyPreview(text, url, startedAt) {
+    if (Inbox.has(invalidatedAt, url) && startedAt < invalidatedAt[url]) return
     var parsed = null
     if (String(text || "").length <= 1048576) {
       try { parsed = JSON.parse(text) } catch (e) { parsed = null }
     }
     if (!parsed || typeof parsed !== "object") parsed = { error: "Unreadable preview data" }
     var ok = String(parsed.error || "") === "" && parsed.url === url
+    if (!ok) {
+      var failed = Inbox.copy(failedAt)
+      failed[url] = Date.now()
+      failedAt = failed
+    }
     if (ok) {
       var next = Object.keys(previewCache).length > 50 ? Inbox.dict() : Inbox.copy(previewCache)
       next[url] = { data: parsed, at: Date.now() }
@@ -689,8 +741,14 @@ Panel {
     }
     if (url !== previewUrl) return
     previewLoading = false
-    // A failed refresh keeps the older preview on screen.
-    if (!ok && previewData && previewData.url === url) return
+    // A failed refresh keeps the older preview on screen, marked as such.
+    if (!ok && previewData && previewData.url === url) { previewStale = true; return }
+    previewStale = false
+    // GitHub computes mergeability lazily: ask again a few times.
+    if (ok && parsed.kind === "pr" && parsed.mergeable === "UNKNOWN" && unknownRetries < 3) {
+      unknownRetries++
+      unknownRetryTimer.restart()
+    }
     previewError = ok ? "" : String(parsed.error || "Unreadable preview data")
     previewData = ok ? parsed : null
   }
@@ -698,10 +756,11 @@ Panel {
   Process {
     id: previewProcess
     property string requested: ""
+    property double startedAt: 0
     running: false
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyPreview(text, previewProcess.requested)
+      onStreamFinished: root.applyPreview(text, previewProcess.requested, previewProcess.startedAt)
     }
     onRunningChanged: if (!running) {
       if (root.previewLoading && root.previewUrl !== requested) Qt.callLater(root.loadPreview)
@@ -727,14 +786,23 @@ Panel {
 
   function startComment() {
     if (!previewData || actionBusy) return
+    previewDebounce.stop()
     previewNotice = ""
     previewMode = "comment"
   }
 
+  // The merge strip freezes what it asks about: URL, number, base and the
+  // head commit shown. A refresh landing meanwhile cannot change the target.
+  property var mergeTarget: null
+  property double mergeOpenedAt: 0
+
   function startMerge() {
     if (!previewData || actionBusy) return
     if (mergeBlock !== "") { notice(mergeBlock, true); return }
+    previewDebounce.stop()
+    mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
     mergeMethod = previewData.mergeMethods[0]
+    mergeOpenedAt = Date.now()
     previewNotice = ""
     previewMode = "merge"
   }
@@ -762,17 +830,27 @@ Panel {
     actionProcess.running = true
   }
 
+  // Enter or the button, never a held key: confirmations in the first
+  // 400 ms after the strip opens are ignored, so key repeat cannot pass.
   function confirmMerge() {
-    if (actionBusy || mergeBlock !== "" || previewMode !== "merge") return
+    if (actionBusy || previewMode !== "merge" || !mergeTarget) return
+    if (Date.now() - mergeOpenedAt < 400) return
+    if (previewData && String(previewData.headSha) !== mergeTarget.sha) {
+      previewMode = ""
+      notice("New commits arrived since you opened this. Review them, then press m again.", true)
+      return
+    }
     actionBusy = true
     actionProcess.kind = "merge"
-    actionProcess.target = previewUrl
+    actionProcess.target = mergeTarget.url
     actionProcess.payload = ""
     actionProcess.stdinEnabled = false
-    actionProcess.command = ["bash", previewPath, "merge", previewUrl, mergeMethod, String(previewData.headSha)]
+    actionProcess.command = ["bash", previewPath, "merge", mergeTarget.url, mergeMethod, mergeTarget.sha]
     actionProcess.running = true
   }
 
+  // The pane cannot move on while an action runs (see onCursorUrlChanged
+  // and the Esc handling), so its result always lands on its own item.
   function actionFinished(text) {
     actionBusy = false
     var parsed = null
@@ -786,6 +864,10 @@ Panel {
     previewMode = ""
     notice(kind === "merge" ? "Merged" : "Comment posted", false)
     // Show what GitHub now says, and let the list catch up with a merge.
+    // Any answer to a request started before now is out of date.
+    var stale = Inbox.copy(invalidatedAt)
+    stale[actionProcess.target] = Date.now()
+    invalidatedAt = stale
     var next = Inbox.copy(previewCache)
     delete next[actionProcess.target]
     previewCache = next
@@ -795,6 +877,8 @@ Panel {
     }
     if (kind === "merge") refreshNow()
   }
+
+  property var invalidatedAt: Inbox.dict()
 
   // Comment text goes in on stdin, never argv, which any local user can read.
   Process {
@@ -824,10 +908,12 @@ Panel {
                        : " · u or click to undo (" + left + "s)")
     }
     if (keysOpen) return "? or Esc back"
+    if (actionBusy) return actionProcess.kind === "merge" ? "Merging…" : "Posting the comment…"
     if (previewOpen && previewMode === "merge")
       return "↵ confirm merge" + (previewData && previewData.mergeMethods && previewData.mergeMethods.length > 1 ? " · h/l method" : "") + " · Esc cancel"
     if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
-    if (previewOpen) return "j/k follow · J/K scroll · ↵ open · c comment" + (previewData && previewData.kind === "pr" ? " · m merge" : "") + " · p close"
+    if (previewOpen) return "j/k follow · J/K scroll · ↵ open · c comment" + (previewData && previewData.kind === "pr" ? " · m merge" : "")
+      + (paneSolo ? " · p back to the list" : " · p close")
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
       if (!srow) return "space toggle · j/k move · s or Esc back"
@@ -1041,6 +1127,14 @@ Panel {
   // Find lives in the inbox, so it leaves settings and scrolls to the field.
   function scrollPreview(direction) { previewPane.scrollBy(direction) }
 
+  // Open from the pane does what opening the row does (a notification is
+  // dismissed, a mention marked seen) when the pane shows the cursor's row.
+  function openPreviewed() {
+    var row = rowAt(cursor)
+    if (row && row.item && String(row.item.url) === previewUrl) activateCursor()
+    else openUrl(previewUrl)
+  }
+
   function openSearch() {
     keysOpen = false
     if (settingsOpen) closeSettings()
@@ -1100,6 +1194,7 @@ Panel {
 
   function refreshNow() {
     if (!fetchProcess.running) fetchProcess.running = true
+    if (previewOpen && previewMode === "") reloadPreview()
   }
 
   function applyFetch(text) {
@@ -1390,7 +1485,7 @@ Panel {
     focusTarget: keyCatcher
     // The preview pane widens the panel; the bar keeps it on screen, so it
     // grows away from the screen edge.
-    contentWidth: panel.fittedContentWidth(Style.space(400) + (root.previewOpen ? Style.space(452) : 0))
+    contentWidth: panel.fittedContentWidth(Style.space(400) + (root.previewOpen && root.paneFits ? Style.space(452) : 0))
     contentHeight: panel.fittedContentHeight(Math.max(column.implicitHeight,
         root.previewOpen ? previewPane.implicitHeight : 0) + hintBar.implicitHeight
       + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(root.previewOpen ? 720 : 640))
@@ -1432,11 +1527,13 @@ Panel {
         if (root.keysOpen) return
         if (root.previewOpen && root.previewMode === "merge") root.confirmMerge()
         else if (root.settingsOpen) root.activateSettings()
-        else if (root.previewOpen && root.previewUrl !== "") root.openUrl(root.previewUrl)
+        else if (root.previewOpen && root.previewUrl !== "") root.openPreviewed()
         else root.activateCursor()
       }
       onDeleteRequested: if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
       onCloseRequested: {
+        // A running comment or merge keeps its strip and pane on screen.
+        if (root.actionBusy) return
         if (root.previewOpen && root.previewMode !== "") root.previewMode = ""
         else if (root.previewOpen) root.closePreview()
         else if (root.keysOpen) root.keysOpen = false
@@ -1448,13 +1545,13 @@ Panel {
       onTextKey: function(t) {
         // u, s and / still work over the legend: undo must never be blocked,
         // and the other two leave the legend for their view.
-        if (root.previewOpen && root.previewMode === "merge") {
-          if (t === "m") root.confirmMerge()
-          return
-        }
+        // While the merge strip is open only Enter confirms: a held `m`
+        // must never open and confirm in one go.
+        if (root.previewOpen && root.previewMode === "merge") return
         if (t === "?") root.keysOpen = !root.keysOpen
         else if (t === "u") root.undoDismiss()
-        else if (t === "p" && !root.settingsOpen && !root.keysOpen) root.togglePreview()
+        else if (t === "p" && !root.settingsOpen && !root.keysOpen && !root.actionBusy) root.togglePreview()
+        else if (root.previewOpen && (t === "r" || t === "R")) root.refreshNow()
         else if (root.previewOpen && t === "c") root.startComment()
         else if (root.previewOpen && t === "m") root.startMerge()
         // Ctrl+d and Ctrl+u arrive as control characters. J, K and the page
@@ -1496,10 +1593,11 @@ Panel {
         id: previewPane
         inbox: root
         onLeft: root.paneOnLeft
-        anchors.left: root.paneOnLeft ? parent.left : panelFlick.right
-        anchors.leftMargin: root.paneOnLeft ? 0 : Style.space(12)
-        anchors.right: root.paneOnLeft ? panelFlick.left : parent.right
-        anchors.rightMargin: root.paneOnLeft ? Style.space(12) : 0
+        anchors.left: root.paneOnLeft || root.paneSolo ? parent.left : panelFlick.right
+        anchors.leftMargin: root.paneOnLeft || root.paneSolo ? 0 : Style.space(12)
+        anchors.right: root.paneOnLeft && !root.paneSolo ? panelFlick.left : parent.right
+        anchors.rightMargin: root.paneOnLeft && !root.paneSolo ? Style.space(12) : 0
+        solo: root.paneSolo
         anchors.top: parent.top
         anchors.bottom: panelFlick.bottom
         visible: width > Style.space(40)
@@ -1559,7 +1657,8 @@ Panel {
         // does not grow toward, and the pane opens on the other.
         anchors.left: root.paneOnLeft ? undefined : parent.left
         anchors.right: root.paneOnLeft ? parent.right : undefined
-        width: root.previewOpen ? root.listWidth : parent.width
+        width: root.previewOpen && !root.paneSolo ? root.listWidth : parent.width
+        visible: !root.paneSolo
         anchors.top: parent.top
         anchors.bottom: failureLine.visible ? failureLine.top : hintBar.top
         contentWidth: width
