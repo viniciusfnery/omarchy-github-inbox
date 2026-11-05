@@ -22,6 +22,9 @@ Item {
   readonly property bool full: inbox.previewData !== null
   readonly property var d: inbox.previewData || inbox.previewStub
   readonly property bool isPr: d !== null && d.kind === "pr"
+  // Non-required checks can fail on a mergeable PR (GitHub's UNSTABLE).
+  readonly property bool checksFailing: full && isPr && d.checks
+    && (d.checks.failed > 0 || d.checks.state === "FAILURE" || d.checks.state === "ERROR" || d.mergeState === "UNSTABLE")
 
   implicitHeight: (header.visible ? header.height + Style.space(10) : 0) + content.implicitHeight + actions.implicitHeight + Style.space(12)
 
@@ -61,11 +64,20 @@ Item {
     return t === "" ? "" : (t === "now" ? "just now" : t + " ago")
   }
 
+  // GitHub's own reading: a merged PR and a completed issue are done, a
+  // closed unmerged PR is the only red, "not planned" is quiet.
   function stateColor(state) {
     if (state === "MERGED") return Color.accent
+    if (state === "CLOSED" && !isPr) return d && d.stateReason === "NOT_PLANNED" ? inbox.dim : Color.accent
     if (state === "CLOSED") return inbox.urgent
     if (state === "DRAFT") return inbox.dim
     return inbox.foreground
+  }
+
+  function stateLabel() {
+    if (!d) return ""
+    if (d.state === "CLOSED" && !isPr && d.stateReason === "NOT_PLANNED") return "Not planned"
+    return String(d.state).charAt(0) + String(d.state).slice(1).toLowerCase()
   }
 
   // Bodies are markdown, shown as plain text (never rendered, so nothing in
@@ -199,7 +211,7 @@ Item {
         Text {
           id: stateText
           anchors.centerIn: parent
-          text: pane.d ? String(pane.d.state).charAt(0) + String(pane.d.state).slice(1).toLowerCase() : ""
+          text: pane.stateLabel()
           textFormat: Text.PlainText
           color: pane.stateColor(pane.d ? pane.d.state : "")
           font.family: pane.inbox.fontFamily
@@ -332,7 +344,9 @@ Item {
         StatusLine {
           glyph: pane.inbox.mergeBlock === "" ? "" : ""
           tone: pane.inbox.mergeBlock === "" ? pane.inbox.foreground : pane.inbox.dim
-          text: pane.inbox.mergeBlock === "" ? "Ready to merge into " + pane.d.base : pane.inbox.mergeBlock
+          text: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock
+            : (pane.checksFailing ? "Can merge into " + pane.d.base + ", but checks are failing"
+              : "Ready to merge into " + pane.d.base)
         }
       }
 
@@ -438,7 +452,8 @@ Item {
         visible: pane.full && pane.d.comments.length > 0
         width: parent.width
         topPadding: Style.space(6)
-        text: "LATEST COMMENTS"
+        text: "LATEST COMMENTS" + (pane.d && pane.d.commentTotal > pane.d.comments.length
+          ? " · " + pane.d.comments.length + " OF " + pane.d.commentTotal : "")
         foreground: pane.inbox.foreground
         fontFamily: pane.inbox.fontFamily
       }
@@ -699,6 +714,17 @@ Item {
           wrapMode: Text.Wrap
         }
 
+        Text {
+          visible: pane.checksFailing
+          width: parent.width
+          text: "Checks are failing on this commit."
+          textFormat: Text.PlainText
+          color: pane.inbox.urgent
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+
         Flow {
           visible: pane.isPr && pane.d.mergeMethods.length > 1
           width: parent.width
@@ -757,7 +783,7 @@ Item {
       spacing: Style.space(8)
 
       Button {
-        text: "Open"
+        text: "Open in browser"
         tooltipText: "Enter"
         bordered: true
         foreground: pane.inbox.foreground

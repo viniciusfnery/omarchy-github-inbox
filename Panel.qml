@@ -535,7 +535,10 @@ Panel {
   // bar it grows to the left. The pane goes on that side so the list stays
   // still while the panel widens. Read when the pane opens, not live.
   property bool paneOnLeft: true
-  property real listWidth: Style.space(400)
+  // The list's closed width (the panel's closed content width less the
+  // panel's own padding), kept in both states, so it never re-wraps while
+  // the panel widens or shrinks.
+  readonly property real listWidth: closedContentWidth - (panel.contentWidth - keyCatcher.width)
 
   // Both columns need about 852 units. On a screen too narrow for that the
   // pane takes the panel on its own, and p or Esc goes back to the list.
@@ -862,8 +865,8 @@ Panel {
   property var mergeTarget: null
 
   function startMerge() {
-    if (!previewData || actionBusy) return
-    if (mergeBlock !== "") { notice(mergeBlock, true); return }
+    if (!previewData || actionBusy || previewMode !== "") return
+    if (mergeBlock !== "") { notice(mergeBlock, false); return }
     previewDebounce.stop()
     mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
     mergeMethod = previewData.mergeMethods[0]
@@ -930,6 +933,8 @@ Panel {
     var kind = actionProcess.kind
     if (!parsed || parsed.ok !== true) {
       notice(parsed && parsed.error ? String(parsed.error) : "GitHub did not answer", true)
+      // A failed post keeps its draft: give the box the keys back.
+      if (previewMode === "comment") Qt.callLater(function() { previewPane.focusComment() })
       return
     }
     if (kind === "comment") commentPosted(actionProcess.target)
@@ -1602,9 +1607,11 @@ Panel {
     // The preview pane widens the panel; the bar keeps it on screen, so it
     // grows away from the screen edge.
     contentWidth: panel.fittedContentWidth(Style.space(400) + (root.previewOpen && root.paneFits ? Style.space(452) : 0))
-    contentHeight: panel.fittedContentHeight(Math.max(column.implicitHeight,
-        root.previewOpen ? previewPane.implicitHeight : 0) + hintBar.implicitHeight
-      + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(root.previewOpen ? 720 : 640))
+    // While the preview is open the panel keeps one height, so j/k through
+    // short lists does not move its bottom edge; the pane scrolls inside.
+    contentHeight: root.previewOpen ? panel.fittedContentHeight(Style.space(720), Style.space(720))
+      : panel.fittedContentHeight(column.implicitHeight + hintBar.implicitHeight
+        + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(640))
     Behavior on contentWidth { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
     Behavior on contentHeight { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
@@ -1614,7 +1621,6 @@ Panel {
       blocked: searchField.activeFocus || root.commentFocused
       // The list's width with the pane closed, kept while it is open so
       // the list does not change size or move as the panel widens.
-      onWidthChanged: if (!root.previewOpen) root.listWidth = width
 
       onMoveRequested: function(dx, dy) {
         // Choosing how to merge: left and right pick the method, nothing moves.
@@ -1666,6 +1672,10 @@ Panel {
         // While the merge strip is open only Enter confirms: a held `m`
         // must never open and confirm in one go.
         if (root.previewOpen && root.previewMode === "merge") return
+        // With the comment box open, a key that reached the list (focus lost
+        // after a failed post, say) goes back to the box and does nothing
+        // else: a word typed there must never open or confirm a merge.
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
         if (t === "?") root.keysOpen = !root.keysOpen
         else if (t === "u") root.undoDismiss()
         else if (t === "p" && !root.settingsOpen && !root.keysOpen && !root.actionBusy) root.togglePreview()
@@ -1719,14 +1729,14 @@ Panel {
         id: previewPane
         inbox: root
         onLeft: root.paneOnLeft
-        anchors.left: root.paneOnLeft || root.paneSolo ? parent.left : panelFlick.right
-        anchors.leftMargin: root.paneOnLeft || root.paneSolo ? 0 : Style.space(12)
-        anchors.right: root.paneOnLeft && !root.paneSolo ? panelFlick.left : parent.right
-        anchors.rightMargin: root.paneOnLeft && !root.paneSolo ? Style.space(12) : 0
+        // A fixed width on the outer edge, so it stays drawn while it fades
+        // and the panel grows or shrinks around it.
+        x: root.paneSolo ? 0 : (root.paneOnLeft ? 0 : root.listWidth + Style.space(12))
+        width: root.paneSolo ? parent.width : Style.space(440)
         solo: root.paneSolo
         anchors.top: parent.top
         anchors.bottom: panelFlick.bottom
-        visible: width > Style.space(40)
+        visible: opacity > 0.01
         opacity: root.previewOpen ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 160 } }
       }
@@ -1781,9 +1791,9 @@ Panel {
         id: panelFlick
         // The list keeps its place on screen: it sits on the side the panel
         // does not grow toward, and the pane opens on the other.
-        anchors.left: root.paneOnLeft ? undefined : parent.left
-        anchors.right: root.paneOnLeft ? parent.right : undefined
-        width: root.previewOpen && !root.paneSolo ? root.listWidth : parent.width
+        anchors.left: root.paneOnLeft && !root.paneSolo ? undefined : parent.left
+        anchors.right: root.paneOnLeft && !root.paneSolo ? parent.right : undefined
+        width: root.paneSolo ? parent.width : root.listWidth
         visible: !root.paneSolo
         anchors.top: parent.top
         anchors.bottom: failureLine.visible ? failureLine.top : hintBar.top

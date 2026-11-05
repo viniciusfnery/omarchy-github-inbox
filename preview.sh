@@ -35,15 +35,15 @@ view)
         number title state isDraft url createdAt body additions deletions changedFiles
         baseRefName headRefName headRefOid reviewDecision mergeable mergeStateStatus
         author { login } labels(first: 10) { nodes { name } }
-        comments(last: 3) { nodes { author { login } createdAt body } }
+        comments(last: 3) { totalCount nodes { author { login } createdAt body } }
         commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { totalCount
           nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }'
   else
     q='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) {
       item: issue(number: $number) {
-        number title state url createdAt body author { login }
+        number title state stateReason url createdAt body author { login }
         labels(first: 10) { nodes { name } } assignees(first: 10) { nodes { login } }
-        comments(last: 3) { nodes { author { login } createdAt body } } } } }'
+        comments(last: 3) { totalCount nodes { author { login } createdAt body } } } } }'
   fi
   # Owner and repo as strings (-f): -F would turn a numeric name into an int.
   errfile=$(mktemp) || fail "No temporary file"
@@ -75,7 +75,8 @@ view)
       createdAt: ($p.createdAt // ""),
       labels: [($p.labels.nodes // [])[] | .name | cut(50)][0:10],
       body: ($p.body | cut(1200)),
-      comments: [($p.comments.nodes // [])[] | {author: (.author | login), createdAt: (.createdAt // ""), body: (.body | cut(400))}]
+      comments: [($p.comments.nodes // [])[] | {author: (.author | login), createdAt: (.createdAt // ""), body: (.body | cut(400))}],
+      commentTotal: (($p.comments.totalCount) // 0)
     } + if $kind == "pr" then {
       reviewDecision: ($p.reviewDecision // ""),
       mergeable: ($p.mergeable // ""),
@@ -98,7 +99,8 @@ view)
         (if $r.mergeCommitAllowed == true then "merge" else empty end),
         (if $r.rebaseMergeAllowed == true then "rebase" else empty end)]
     } else {
-      assignees: [($p.assignees.nodes // [])[] | login][0:10]
+      assignees: [($p.assignees.nodes // [])[] | login][0:10],
+      stateReason: ($p.stateReason // "")
     } end' <<<"$json" || fail "Failed to read GitHub data"
   ;;
 comment)

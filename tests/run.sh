@@ -249,7 +249,7 @@ pr_fixture() { # [body padding bytes]
         {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
         {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
         {__typename: "StatusContext", state: "SUCCESS"}]}}}}]},
-      comments: {nodes: [range(3; 6) | {author: {login: ("u" + tostring)}, createdAt: "2026-01-02T00:00:00Z",
+      comments: {totalCount: 40, nodes: [range(3; 6) | {author: {login: ("u" + tostring)}, createdAt: "2026-01-02T00:00:00Z",
         body: ("comment " + tostring + " " + $long)}]}}}}}' >"$FAKE_GH_FIXTURES/graphql.json"
 }
 
@@ -265,6 +265,16 @@ t "preview: body and comments are cut to size, the last 3 comments in order" \
 t "preview: one GraphQL call, owner and repo as strings" \
   "$([[ $(grep -c '^api graphql' "$FAKE_GH_LOG") -eq 1 ]] && grep -q -- '-f owner=acme -f repo=repo1 -F number=7' "$FAKE_GH_LOG" && echo true || echo false)"
 t "preview: someone with write access can merge" "$(jqt '.canMerge == true' "$out")"
+t "preview: the comment total comes with the last three" "$(jqt '.commentTotal == 40' "$out")"
+
+# A closed issue says how it closed: completed and not planned read differently.
+fresh_env
+jq -n '{data: {repository: {item: {number: 3, title: "Old bug", state: "CLOSED", stateReason: "NOT_PLANNED",
+  url: "https://github.com/acme/repo1/issues/3", createdAt: "2026-01-01T00:00:00Z", body: "",
+  author: {login: "bob"}, labels: {nodes: []}, assignees: {nodes: []}, comments: {totalCount: 0, nodes: []}}}}}' \
+  >"$FAKE_GH_FIXTURES/graphql.json"
+out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/issues/3")
+t "preview: a closed issue carries its reason" "$(jqt '.kind == "issue" and .state == "CLOSED" and .stateReason == "NOT_PLANNED"' "$out")"
 
 fresh_env
 FAKE_PERMISSION=READ pr_fixture
