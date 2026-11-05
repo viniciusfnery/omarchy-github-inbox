@@ -138,7 +138,7 @@ view)
 comment)
   # Read into a private temp file and post that file: the byte count and the
   # NUL check see exactly what is posted ($(...) drops NULs and trailing
-  # newlines, which once let a long comment through cut short).
+  # newlines).
   tmp=$(mktemp) || fail "No temporary file"
   trap 'rm -f "$tmp"' EXIT
   # A write cut short (disk full, a file-size limit) must not post the part
@@ -160,7 +160,8 @@ merge)
   [[ $method =~ ^(squash|merge|rebase)$ ]] || fail "Unknown merge method"
   # The head the user looked at: a PR pushed to since then does not merge.
   [[ $sha =~ ^[0-9a-f]{6,40}$ ]] || fail "Missing head commit"
-  [[ $base =~ ^[A-Za-z0-9._/-]+$ ]] || fail "Missing base branch"
+  # Only compared as a string, so any branch name passes, bounded.
+  [[ -n $base && ${#base} -le 255 && $base != *[[:cntrl:]]* ]] || fail "Missing base branch"
   # GitHub's merge APIs pin the head (sha) but not the base, so the base is
   # read again right before the merge, leaving a window of about a second.
   # The REST merge endpoint merges now or fails: it never joins a merge
