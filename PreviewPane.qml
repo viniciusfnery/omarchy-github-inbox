@@ -10,7 +10,10 @@ Item {
   id: pane
 
   required property var inbox
-  readonly property var d: inbox.previewData
+  // Full data once gh answers. Before that, the row's own title and number,
+  // so the pane is never empty while it loads.
+  readonly property bool full: inbox.previewData !== null
+  readonly property var d: inbox.previewData || inbox.previewStub
   readonly property bool isPr: d !== null && d.kind === "pr"
 
   implicitHeight: content.implicitHeight + actions.implicitHeight + Style.space(12)
@@ -102,7 +105,7 @@ Item {
         Text {
           id: headerText
           anchors.left: parent.left
-          anchors.right: statePill.left
+          anchors.right: statePill.visible ? statePill.left : parent.right
           anchors.rightMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
           text: pane.d ? (pane.isPr ? "  " : "  ")
@@ -116,6 +119,7 @@ Item {
 
         BorderSurface {
           id: statePill
+          visible: pane.full
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           implicitWidth: stateText.implicitWidth + Style.space(14)
@@ -151,10 +155,10 @@ Item {
       }
 
       Text {
-        visible: pane.d !== null
+        visible: pane.full
         width: parent.width
         text: {
-          if (!pane.d) return ""
+          if (!pane.full) return ""
           var parts = ["@" + pane.d.author, "opened " + pane.ago(pane.d.createdAt)]
           if (pane.isPr) {
             parts.push(pane.d.base + " ← " + pane.d.head)
@@ -174,7 +178,7 @@ Item {
 
       // ---------- Status: checks, review, merge ----------
       Column {
-        visible: pane.isPr && pane.d.state !== "MERGED" && pane.d.state !== "CLOSED"
+        visible: pane.full && pane.isPr && pane.d.state !== "MERGED" && pane.d.state !== "CLOSED"
         width: parent.width
         spacing: Style.space(4)
 
@@ -209,12 +213,12 @@ Item {
 
       // ---------- Labels ----------
       Flow {
-        visible: pane.d !== null && pane.d.labels.length > 0
+        visible: pane.full && pane.d.labels.length > 0
         width: parent.width
         spacing: Style.space(6)
 
         Repeater {
-          model: pane.d ? pane.d.labels : []
+          model: pane.full ? pane.d.labels : []
 
           BorderSurface {
             required property var modelData
@@ -237,11 +241,23 @@ Item {
         }
       }
 
+      // ---------- Still loading ----------
+      Text {
+        visible: !pane.full && pane.d !== null
+        width: parent.width
+        text: pane.inbox.previewError !== "" ? pane.inbox.previewError : "Loading details…"
+        textFormat: Text.PlainText
+        color: pane.inbox.previewError !== "" ? pane.inbox.urgent : pane.inbox.dim
+        font.family: pane.inbox.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+
       // ---------- Description ----------
-      PanelSeparator { visible: pane.d !== null; foreground: pane.inbox.foreground }
+      PanelSeparator { visible: pane.full; foreground: pane.inbox.foreground }
 
       PanelSectionHeader {
-        visible: pane.d !== null
+        visible: pane.full
         width: parent.width
         text: "DESCRIPTION"
         foreground: pane.inbox.foreground
@@ -249,11 +265,11 @@ Item {
       }
 
       Text {
-        visible: pane.d !== null
+        visible: pane.full
         width: parent.width
-        text: pane.d ? (pane.plainBody(pane.d.body) || "No description.") : ""
+        text: pane.full ? (pane.plainBody(pane.d.body) || "No description.") : ""
         textFormat: Text.PlainText
-        color: pane.d && pane.plainBody(pane.d.body) !== "" ? pane.inbox.foreground : pane.inbox.dim
+        color: pane.full && pane.plainBody(pane.d.body) !== "" ? pane.inbox.foreground : pane.inbox.dim
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.Wrap
@@ -263,7 +279,7 @@ Item {
 
       // ---------- Comments ----------
       PanelSectionHeader {
-        visible: pane.d !== null && pane.d.comments.length > 0
+        visible: pane.full && pane.d.comments.length > 0
         width: parent.width
         topPadding: Style.space(6)
         text: "LATEST COMMENTS"
@@ -272,7 +288,7 @@ Item {
       }
 
       Repeater {
-        model: pane.d ? pane.d.comments : []
+        model: pane.full ? pane.d.comments : []
 
         Column {
           required property var modelData
@@ -494,6 +510,7 @@ Item {
       Button {
         text: "Comment"
         tooltipText: "c"
+        enabled: pane.full
         bordered: true
         foreground: pane.inbox.foreground
         fontFamily: pane.inbox.fontFamily
@@ -503,6 +520,7 @@ Item {
 
       Button {
         visible: pane.isPr
+        enabled: pane.full
         text: "Merge"
         tooltipText: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m"
         bordered: true

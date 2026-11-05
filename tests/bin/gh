@@ -41,8 +41,21 @@ fi
 
 url="${1:-}"
 
+# preview.sh's single GraphQL query.
+if [[ $url == graphql ]]; then
+  if [[ ${FAKE_GH_PREVIEW_FAIL:-0} == 1 ]]; then echo '{"errors":[{"message":"Could not resolve"}]}'; exit 1; fi
+  cat "${FAKE_GH_FIXTURES:?}/graphql.json"
+  exit 0
+fi
+
+# Repo metadata, honoring --jq like the real gh.
+#   FAKE_GH_BIG_REPO=1 -> pad it past the kernel's 128KB per-argument limit
 if [[ $url == repos/*/* && $url != */notifications* ]]; then
-  echo '{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": true}'
+  meta='{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": true}'
+  # printf is a builtin, so the padding never becomes an argument.
+  [[ ${FAKE_GH_BIG_REPO:-0} == 1 ]] && meta=$(printf '{"allow_squash_merge": true, "allow_merge_commit": false, "allow_rebase_merge": true, "description": "%s"}' "$(head -c 140000 /dev/zero | tr '\0' x)")
+  shift
+  if [[ ${1:-} == --jq ]]; then jq -c "$2" <<<"$meta"; else printf '%s\n' "$meta"; fi
   exit 0
 fi
 

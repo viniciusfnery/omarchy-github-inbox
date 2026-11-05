@@ -232,21 +232,24 @@ t "notify: body markup is escaped, summary stays as given" \
 
 # ------------------------------------------------------------------ preview
 PREVIEW="$PWD/preview.sh"
-pr_fixture() {
+pr_fixture() { # [body padding bytes]
   long=$(printf 'b%.0s' $(seq 1 5000))
-  jq -n --arg long "$long" '{number: 7, title: "Fix it", state: "OPEN", isDraft: false,
-    author: {login: "alice"}, createdAt: "2026-01-01T00:00:00Z", body: ("intro\n" + $long),
-    labels: [{name: "bug"}], reviewDecision: "APPROVED", mergeable: "MERGEABLE",
-    mergeStateStatus: "CLEAN", additions: 10, deletions: 2, changedFiles: 3,
-    baseRefName: "main", headRefName: "fix", headRefOid: "abc123",
-    url: "https://github.com/acme/repo1/pull/7",
-    statusCheckRollup: [
-      {__typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS"},
-      {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
-      {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
-      {__typename: "StatusContext", state: "SUCCESS"}],
-    comments: [range(6) | {author: {login: ("u" + tostring)}, createdAt: "2026-01-02T00:00:00Z",
-      body: ("comment " + tostring + " " + $long)}]}' >"$FAKE_GH_FIXTURES/pr-view.json"
+  pad=$(head -c "${1:-0}" /dev/zero | tr '\0' p)
+  jq -n --arg long "$long" --rawfile pad <(printf '%s' "$pad") '{data: {repository: {
+    squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: true,
+    item: {number: 7, title: "Fix it", state: "OPEN", isDraft: false,
+      author: {login: "alice"}, createdAt: "2026-01-01T00:00:00Z", body: ("intro\n" + $long + $pad),
+      labels: {nodes: [{name: "bug"}]}, reviewDecision: "APPROVED", mergeable: "MERGEABLE",
+      mergeStateStatus: "CLEAN", additions: 10, deletions: 2, changedFiles: 3,
+      baseRefName: "main", headRefName: "fix", headRefOid: "abc123",
+      url: "https://github.com/acme/repo1/pull/7",
+      commits: {nodes: [{commit: {statusCheckRollup: {contexts: {nodes: [
+        {__typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS"},
+        {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
+        {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
+        {__typename: "StatusContext", state: "SUCCESS"}]}}}}]},
+      comments: {nodes: [range(3; 6) | {author: {login: ("u" + tostring)}, createdAt: "2026-01-02T00:00:00Z",
+        body: ("comment " + tostring + " " + $long)}]}}}}}' >"$FAKE_GH_FIXTURES/graphql.json"
 }
 
 fresh_env
@@ -256,8 +259,10 @@ t "preview: a PR comes back normalized" \
   "$(jqt '.kind == "pr" and .number == 7 and .author == "alice" and .labels == ["bug"] and .headSha == "abc123" and .mergeable == "MERGEABLE"' "$out")"
 t "preview: checks are counted, not listed" \
   "$(jqt '.checks == {passed: 2, failed: 1, pending: 1}' "$out")"
-t "preview: body and comments are cut to size, only the last 3 comments" \
+t "preview: body and comments are cut to size, the last 3 comments in order" \
   "$(jqt '(.body | length) <= 1201 and (.comments | length) == 3 and .comments[0].author == "u3" and ([.comments[].body | length] | max) <= 401' "$out")"
+t "preview: one GraphQL call, owner and repo as strings" \
+  "$([[ $(grep -c '^api graphql' "$FAKE_GH_LOG") -eq 1 ]] && grep -q -- '-f owner=acme -f repo=repo1 -F number=7' "$FAKE_GH_LOG" && echo true || echo false)"
 t "preview: merge methods follow the repo settings, squash first" \
   "$(jqt '.mergeMethods == ["squash", "rebase"]' "$out")"
 
@@ -281,6 +286,19 @@ fresh_env
 printf '%s' 'Looks good; $(id) stays text' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issues/3" >/dev/null
 t "preview: comment goes to the issue on stdin, byte for byte" \
   "$(grep -qxF 'issue comment https://github.com/acme/repo1/issues/3 --body-file -' "$FAKE_GH_LOG" && grep -qxF 'stdin: Looks good; $(id) stays text' "$FAKE_GH_LOG" && echo true || echo false)"
+
+# Limits count bytes: 30000 three-byte characters are 90KB, over 64KB,
+# and must be refused, not cut short and posted.
+fresh_env
+out=$(head -c 30000 /dev/zero | tr '\0' 'x' | sed 's/x/あ/g' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
+t "preview: a comment over 64KB in bytes is refused, never truncated" \
+  "$([[ $(jq -r '.error' <<<"$out") == "Comment too long" ]] && ! grep -q 'comment' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+pr_fixture 140000
+out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+t "preview: a response past the 128KB argv limit still previews" \
+  "$(jqt '.number == 7 and .mergeMethods == ["squash", "rebase"] and (.body | length) <= 1201' "$out")"
 
 fresh_env
 out=$(printf '   ' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")

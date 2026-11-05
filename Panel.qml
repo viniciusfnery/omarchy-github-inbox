@@ -519,6 +519,8 @@ Panel {
   property bool previewOpen: false
   property string previewUrl: ""
   property var previewData: null
+  // What the row already knows, shown the instant the pane opens.
+  property var previewStub: null
   property string previewError: ""
   property bool previewLoading: false
   property var previewCache: Inbox.dict()
@@ -558,34 +560,104 @@ Panel {
     keyCatcher.forceActiveFocus()
   }
 
-  // Following the cursor waits a moment, so j/k through a list does not
-  // fire one gh call per row.
-  onCursorUrlChanged: if (previewOpen && previewMode === "" && cursorUrl !== "") previewDebounce.restart()
+  // A cached preview shows at once. Otherwise following the cursor waits a
+  // moment, so j/k through a list does not fire one gh call per row. With
+  // the pane closed, a row the cursor rests on is fetched in the background,
+  // so `p` usually opens on a cache hit.
+  onCursorUrlChanged: {
+    if (cursorUrl === "" || !opened) return
+    if (previewOpen && previewMode === "") {
+      if (cachedPreview(cursorUrl, 300000)) showPreview(cursorUrl)
+      else previewDebounce.restart()
+    } else if (!previewOpen) {
+      prefetchTimer.restart()
+    }
+  }
   Timer {
     id: previewDebounce
-    interval: 180
+    interval: 120
     onTriggered: root.showPreview(root.cursorUrl)
   }
+  Timer {
+    id: prefetchTimer
+    interval: 400
+    onTriggered: if (!root.previewOpen) root.prefetch(root.cursorUrl)
+  }
 
+  function cachedPreview(url, maxAge) {
+    var hit = Inbox.has(previewCache, url) ? previewCache[url] : null
+    return hit && Date.now() - hit.at < maxAge ? hit : null
+  }
+
+  function stubFor(url) {
+    var row = rowAt(cursor)
+    var it = row && row.item && String(row.item.url) === url ? row.item : null
+    if (!it) return null
+    return { kind: /\/pull\//.test(url) ? "pr" : "issue", url: url, title: String(it.title || ""), stub: true }
+  }
+
+  // Up to five minutes old shows at once. Older than a minute it is
+  // refreshed in the background and replaced when the answer lands.
   function showPreview(url) {
     previewUrl = url
     previewNotice = ""
     previewMode = ""
-    var hit = Inbox.has(previewCache, url) ? previewCache[url] : null
-    if (hit && Date.now() - hit.at < 60000) {
-      previewData = hit.data
-      previewError = ""
-      previewLoading = false
-      return
+    previewStub = stubFor(url)
+    previewError = ""
+    var hit = cachedPreview(url, 300000)
+    previewData = hit ? hit.data : null
+    previewLoading = !hit || Date.now() - hit.at > 60000
+    if (previewLoading) loadPreview()
+    prefetchNeighbors()
+  }
+
+  function prefetchNeighbors() {
+    for (var delta = -1; delta <= 1; delta += 2) {
+      var row = rowAt(cursor + delta)
+      if (row && row.item) prefetch(String(row.item.url))
     }
-    previewLoading = true
-    loadPreview()
+  }
+
+  // Background fetches, at most three waiting, one running, and never ahead
+  // of the visible pane's own fetch.
+  property var prefetchQueue: []
+
+  function prefetch(url) {
+    if (!previewableUrl(url) || cachedPreview(url, 60000)) return
+    if ((prefetchProcess.running && prefetchProcess.requested === url) || prefetchQueue.indexOf(url) >= 0) return
+    if (previewProcess.running && previewProcess.requested === url) return
+    prefetchQueue = prefetchQueue.concat([url]).slice(-3)
+    runPrefetch()
+  }
+
+  function runPrefetch() {
+    if (prefetchProcess.running || previewProcess.running || prefetchQueue.length === 0) return
+    var url = prefetchQueue[0]
+    prefetchQueue = prefetchQueue.slice(1)
+    if (cachedPreview(url, 60000)) { Qt.callLater(runPrefetch); return }
+    prefetchProcess.requested = url
+    prefetchProcess.command = ["bash", previewPath, "view", url]
+    prefetchProcess.running = true
+  }
+
+  Process {
+    id: prefetchProcess
+    property string requested: ""
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyPreview(text, prefetchProcess.requested)
+    }
+    onRunningChanged: if (!running) Qt.callLater(root.runPrefetch)
   }
 
   // One gh call at a time. A cursor that moved on while it ran gets its own
   // call as soon as this one ends, and the stale answer only fills the cache.
+  // A background fetch already running for this URL is simply awaited.
   function loadPreview() {
-    if (previewProcess.running || previewUrl === "") return
+    if (previewUrl === "") return
+    if (prefetchProcess.running && prefetchProcess.requested === previewUrl) return
+    if (previewProcess.running) return
     previewProcess.requested = previewUrl
     previewProcess.command = ["bash", previewPath, "view", previewUrl]
     previewProcess.running = true
@@ -605,6 +677,8 @@ Panel {
     }
     if (url !== previewUrl) return
     previewLoading = false
+    // A failed refresh keeps the older preview on screen.
+    if (!ok && previewData && previewData.url === url) return
     previewError = ok ? "" : String(parsed.error || "Unreadable preview data")
     previewData = ok ? parsed : null
   }
@@ -617,7 +691,10 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.applyPreview(text, previewProcess.requested)
     }
-    onRunningChanged: if (!running && root.previewLoading && root.previewUrl !== requested) Qt.callLater(root.loadPreview)
+    onRunningChanged: if (!running) {
+      if (root.previewLoading && root.previewUrl !== requested) Qt.callLater(root.loadPreview)
+      Qt.callLater(root.runPrefetch)
+    }
   }
 
   // Why the merge button cannot merge, or "" when it can.
