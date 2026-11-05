@@ -179,8 +179,26 @@ t("body blocks: headings, paragraphs, bullets with their depth, numbered items, 
 })
 t("markdown noise: images, links, checkboxes, fences, details and quotes read as text", () => {
   const b = I.bodyBlocks("![shot](https://github.com/user-attachments/x.png)\n<img src=\"https://e.x/a.png\" width=\"300\">\nSee [the docs](https://x.y/z)\n```yaml\nkey: 1\n```\n- [ ] todo\n- [x] done\n<details><summary>More</summary>\nhidden\n</details>")
-  eq(b.map(x => x.bullet + x.text), ["[image]\n[image]\nSee the docs\nkey: 1", "☐ todo", "☑ done", "More\nhidden"])
+  eq(b.map(x => x.bullet + "|" + x.text), ["|[image]\n[image]\nSee the docs\nkey: 1", "☐|todo", "☑|done", "|More\nhidden"])
   assert.strictEqual(I.plainText("> quoted reply\nmy answer with [a link](https://x)\n\n\n\nend"), "my answer with a link\n\nend")
+})
+
+t("bot bodies: HTML lists, links, tables, rules, autolinks, strike and italics read as text", () => {
+  const b = I.bodyBlocks("<ul>\n<li><a href=\"https://x/c\">f299b52</a> Bump deps</li>\n</ul>\n---\nSee <https://auto.link> and ~~old~~ *new*\n<table><tr><td>a</td></tr></table>\nVec<String> stays")
+  eq(b.map(x => x.text), ["f299b52 Bump deps", "See https://auto.link and old new\na\nVec<String> stays"])
+})
+t("checks: the line leads with how many are failing or running, and says when not all were counted", () => {
+  assert.strictEqual(I.checksText({ passed: 30, failed: 0, pending: 0, total: 30, state: "SUCCESS" }), "Checks: 30 passed")
+  assert.strictEqual(I.checksText({ passed: 24, failed: 2, pending: 0, total: 26, state: "FAILURE" }), "2 of 26 checks failing · 24 passed")
+  assert.strictEqual(I.checksText({ passed: 23, failed: 0, pending: 3, total: 26, state: "PENDING" }), "3 of 26 checks running · 23 passed")
+  assert.strictEqual(I.checksText({ passed: 100, failed: 0, pending: 0, total: 140, state: "FAILURE" }), "Checks failing · 100 passed (first 100 of 140)")
+  assert.strictEqual(I.checksText({ passed: 0, failed: 0, pending: 0, total: 0, state: "" }), "No checks")
+})
+t("markdown cleanup is bounded: a huge hostile body stays fast", () => {
+  const t0 = Date.now()
+  I.bodyBlocks("[".repeat(200000) + "](".repeat(1000))
+  I.plainText("<details".repeat(50000))
+  assert.ok(Date.now() - t0 < 500, "took " + (Date.now() - t0) + " ms")
 })
 
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {

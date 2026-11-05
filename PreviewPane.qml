@@ -87,6 +87,13 @@ Item {
   // paragraphs, list items with their depth, table rows.
   readonly property var bodyBlocks: full ? Inbox.bodyBlocks(d.body, 12) : []
   // True when the 12-block cap left something out.
+  TextMetrics {
+    id: markerMetrics
+    text: "00."
+    font.family: pane.inbox.fontFamily
+    font.pixelSize: Style.font.bodySmall
+  }
+
   readonly property bool bodyCapped: full && Inbox.bodyBlocks(d.body, 13).length > 12
 
   function plainBody(text) { return Inbox.plainText(text) }
@@ -208,9 +215,10 @@ Item {
         visible: pane.d === null
         width: parent.width
         topPadding: Style.space(24)
-        text: pane.inbox.previewLoading ? "Loading preview…" : (pane.inbox.previewError || "Nothing to preview")
+        // Errors show once, in the action strip beside Retry.
+        text: pane.inbox.previewLoading ? "Loading preview…" : (pane.inbox.previewError !== "" ? "" : "Nothing to preview")
         textFormat: Text.PlainText
-        color: pane.inbox.previewError !== "" && !pane.inbox.previewLoading ? pane.inbox.urgent : pane.inbox.dim
+        color: pane.inbox.dim
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.body
         horizontalAlignment: Text.AlignHCenter
@@ -277,20 +285,7 @@ Item {
           readonly property bool waiting: !bad && (st === "PENDING" || st === "EXPECTED" || (c && c.pending > 0))
           glyph: !c || (c.total || 0) === 0 ? "" : (bad ? "" : (waiting ? "" : ""))
           tone: bad ? pane.inbox.urgent : (waiting ? pane.inbox.dim : pane.inbox.foreground)
-          text: {
-            if (!c || (c.total || 0) === 0) return "No checks"
-            var parts = []
-            if (c.failed > 0) parts.push(c.failed + " failing")
-            if (c.pending > 0) parts.push(c.pending + " running")
-            if (c.passed > 0) parts.push(c.passed + " passed")
-            var counted = c.passed + c.failed + c.pending
-            // Lead with the overall result: with more checks than counted,
-            // the counts alone can read like a pass.
-            var lead = bad ? "Checks failing" : (waiting ? "Checks running" : "Checks passed")
-            if (c.total <= counted && !bad && !waiting) return "Checks: " + parts.join(", ")
-            return lead + (parts.length > 0 ? " · " + parts.join(", ") : "")
-              + (c.total > counted ? " (first " + counted + " of " + c.total + ")" : "")
-          }
+          text: Inbox.checksText(c)
         }
 
         StatusLine {
@@ -344,11 +339,11 @@ Item {
 
       // ---------- Still loading ----------
       Text {
-        visible: !pane.full && pane.d !== null
+        visible: !pane.full && pane.d !== null && pane.inbox.previewLoading
         width: parent.width
-        text: pane.inbox.previewError !== "" ? pane.inbox.previewError : "Loading details…"
+        text: "Loading details…"
         textFormat: Text.PlainText
-        color: pane.inbox.previewError !== "" ? pane.inbox.urgent : pane.inbox.dim
+        color: pane.inbox.dim
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.Wrap
@@ -392,6 +387,9 @@ Item {
           Text {
             id: bulletText
             visible: modelData.bullet !== ""
+            // As wide as "00." so item text lines up after "9." and "10.".
+            width: markerMetrics.width
+            horizontalAlignment: Text.AlignRight
             text: modelData.bullet
             textFormat: Text.PlainText
             color: pane.inbox.dim
@@ -457,9 +455,10 @@ Item {
 
           Text {
             width: parent.width
-            text: pane.plainBody(modelData.body)
+            readonly property string clean: pane.plainBody(modelData.body)
+            text: clean !== "" ? clean : "Quoted an earlier comment"
             textFormat: Text.PlainText
-            color: pane.inbox.foreground
+            color: clean !== "" ? pane.inbox.foreground : pane.inbox.dim
             font.family: pane.inbox.fontFamily
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.Wrap
@@ -565,7 +564,7 @@ Item {
       width: parent.width
       text: pane.inbox.previewNotice
       textFormat: Text.PlainText
-      color: pane.inbox.previewNoticeError ? pane.inbox.urgent : pane.inbox.foreground
+      color: pane.inbox.previewNoticeError ? pane.inbox.urgent : (pane.inbox.previewNoticeDim ? pane.inbox.dim : pane.inbox.foreground)
       font.family: pane.inbox.fontFamily
       font.pixelSize: Style.font.caption
       wrapMode: Text.Wrap
@@ -782,8 +781,10 @@ Item {
       }
 
       Button {
-        visible: pane.isPr
-        // Clickable when blocked too: a click shows why, like `m` does.
+        // Hidden when it can never merge here (merged, closed, no permission);
+        // shown dim for a block that can pass (draft, conflicts, checking),
+        // and clickable then too: a click says why, like `m` does.
+        visible: pane.isPr && !(pane.full && (pane.d.state === "MERGED" || pane.d.state === "CLOSED" || pane.d.canMerge === false))
         enabled: pane.full
         text: "Merge"
         tooltipText: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m"

@@ -205,17 +205,23 @@ function cleanLine(line) {
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "[image]")
     .replace(/<img[^>]*>/gi, "[image]")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/<\/?(details|summary|br|sub|sup|p|div|b|i|em|strong|code|kbd)\b[^>]*>/gi, "")
+    .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
+    // A known list of tags, not any <...>: code such as Vec<String> stays.
+    .replace(/<\/?(details|summary|br|sub|sup|p|div|b|i|em|strong|code|kbd|a|ul|ol|li|table|thead|tbody|tr|td|th|span|h[1-6]|hr|blockquote|pre|picture|source)\b[^>]*>/gi, "")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/(\*\*|__)(.+?)\1/g, "$2")
+    .replace(/~~(.+?)~~/g, "$1")
+    .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?!\*)/g, "$1$2")
 }
 
 // The description as blocks for the pane: headings, paragraphs, list
 // items with their depth (so a wrapped item keeps its indent), and table
 // rows as "a · b · c". Code fences keep their content and lose the fence.
+// Input is cut to 4000 characters first: the regexes are quadratic on
+// unclosed brackets, and 200 KB of them once took 23 s.
 function bodyBlocks(text, maxBlocks) {
   var max = maxBlocks || 12
-  var lines = String(text || "").replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
+  var lines = String(text || "").slice(0, 4000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
   var blocks = []
   var para = []
   function block(heading, txt, bullet, indent) {
@@ -229,6 +235,7 @@ function bodyBlocks(text, maxBlocks) {
   for (var i = 0; i < lines.length && blocks.length < max; i++) {
     var raw = lines[i]
     if (/^\s*```/.test(raw)) continue
+    if (/^\s*([-*_]\s*){3,}$/.test(raw)) continue
     if (/^\s*\|[\s:|-]+\|\s*$/.test(raw)) continue
     // A table row the 1200-character cut ended early has no closing pipe.
     if (/^\s*\|/.test(raw)) {
@@ -243,7 +250,7 @@ function bodyBlocks(text, maxBlocks) {
       flush()
       var indent = Math.min(4, Math.floor(li[1].length / 2))
       var box = /^\[( |x|X)\]\s+(.*)$/.exec(li[3])
-      if (box) block(false, (box[1] === " " ? "☐ " : "☑ ") + cleanLine(box[2]).trim(), "", indent)
+      if (box) block(false, cleanLine(box[2]).trim(), box[1] === " " ? "☐" : "☑", indent)
       else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent)
       continue
     }
@@ -257,8 +264,22 @@ function bodyBlocks(text, maxBlocks) {
 
 // A comment as plain text: quoted lines (the reply's context) go.
 function plainText(text) {
-  return String(text || "").replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "")
+  return String(text || "").slice(0, 2000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "")
     .split("\n").filter(function(l) { return !/^\s*>/.test(l) && !/^\s*```/.test(l) })
     .map(function(l) { return cleanLine(l.replace(/^#{1,6}\s+/, "")) })
     .join("\n").replace(/\n{3,}/g, "\n\n").trim()
+}
+
+// The checks line. It leads with how many fail or run, and says when more
+// checks exist than the 100 counted, so a pass is never implied by counts.
+function checksText(c) {
+  if (!c || (c.total || 0) === 0) return "No checks"
+  var counted = c.passed + c.failed + c.pending
+  var partial = c.total > counted ? " (first " + counted + " of " + c.total + ")" : ""
+  var passed = c.passed > 0 ? " · " + c.passed + " passed" : ""
+  if (c.failed > 0) return c.failed + " of " + c.total + " checks failing" + passed + partial
+  if (c.pending > 0) return c.pending + " of " + c.total + " checks running" + passed + partial
+  if (c.state === "FAILURE" || c.state === "ERROR") return "Checks failing" + passed + partial
+  if (c.state === "PENDING" || c.state === "EXPECTED") return "Checks running" + passed + partial
+  return "Checks: " + c.passed + " passed" + partial
 }

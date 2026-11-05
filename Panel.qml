@@ -592,8 +592,10 @@ Panel {
     if (!holdAfterAction || !Inbox.releasesHold(cause)) return
     holdAfterAction = false
     // The cursor may not change (pointer motion within the row, Up on the
-    // first row), so bring the pane to it explicitly.
-    Qt.callLater(syncPreviewToCursor)
+    // first row), so bring the pane to it explicitly; with the pointer, once
+    // it rests, like any other pointer follow.
+    if (cause === "pointer") pointerFollowPending = true
+    else Qt.callLater(syncPreviewToCursor)
   }
 
   // Every place following resumes goes through Inbox.followDecision.
@@ -876,7 +878,7 @@ Panel {
 
   function startMerge() {
     if (!previewOpen || !previewData || actionBusy || previewMode !== "") return
-    if (mergeBlock !== "") { notice(mergeBlock, false); return }
+    if (mergeBlock !== "") { notice(mergeBlock, false, true); return }
     previewDebounce.stop()
     mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
     mergeMethod = previewData.mergeMethods[0]
@@ -892,9 +894,12 @@ Panel {
     mergeMethod = methods[((i + delta) % methods.length + methods.length) % methods.length]
   }
 
-  function notice(text, isError) {
+  // Three tones: errors red, results ("Merged") plain, reasons dim.
+  property bool previewNoticeDim: false
+  function notice(text, isError, isDim) {
     previewNotice = text
     previewNoticeError = isError === true
+    previewNoticeDim = isDim === true
   }
 
   function sendComment(text) {
@@ -1160,6 +1165,15 @@ Panel {
   function moveCursor(delta) {
     releaseHold("key")
     if (rowCount === 0) return
+    // The pointer moved the cursor without the pane following yet: j/k step
+    // from the item the pane shows, not from the row the pointer crossed.
+    if (pointerFollowPending && previewOpen && previewUrl !== "") {
+      pointerFollowPending = false
+      for (var r = 0; r < rowCount; r++) {
+        var at = rowAt(r)
+        if (at && at.item && String(at.item.url) === previewUrl) { cursor = r; break }
+      }
+    }
     hoverGate.reset()
     cursorFromKeyboard = true
     cursorActive = true
@@ -2828,7 +2842,10 @@ Panel {
 
       PanelActionButton {
         id: previewButton
-        visible: row.hasCursor && row.item && root.previewableUrl(row.item.url)
+        // Also lit on the row the pane shows, which the cursor may have left
+        // while the pointer travels toward the pane.
+        visible: !!row.item && root.previewableUrl(row.item.url)
+          && (row.hasCursor || (root.previewOpen && String(row.item.url) === root.previewUrl))
         anchors.right: dismissButton.visible ? dismissButton.left : parent.right
         anchors.verticalCenter: parent.verticalCenter
         iconText: "󰈈"
