@@ -147,6 +147,20 @@ t("comment keys: Ctrl+Enter posts once; its auto-repeat is swallowed, never post
   assert.strictEqual(I.commentKey({}), "")
 })
 
+t("follow: the pane follows the cursor, empties without a target, and waits while held or busy", () => {
+  const base = { open: true, mode: "", busy: false, hold: false, cursorUrl: "b", previewUrl: "a" }
+  assert.strictEqual(I.followDecision(base), "show")
+  // Cancelled comment, org switch or empty filter: nothing left to preview.
+  assert.strictEqual(I.followDecision({ ...base, cursorUrl: "" }), "clear")
+  assert.strictEqual(I.followDecision({ ...base, cursorUrl: "a" }), "none")
+  assert.strictEqual(I.followDecision({ ...base, hold: true }), "none")
+  assert.strictEqual(I.followDecision({ ...base, busy: true }), "none")
+  assert.strictEqual(I.followDecision({ ...base, mode: "comment" }), "none")
+  assert.strictEqual(I.followDecision({ ...base, open: false }), "none")
+  // Already empty stays empty without work.
+  assert.strictEqual(I.followDecision({ ...base, cursorUrl: "", previewUrl: "" }), "none")
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

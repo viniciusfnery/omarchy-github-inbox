@@ -588,22 +588,25 @@ Panel {
     Qt.callLater(syncPreviewToCursor)
   }
 
+  // Every place following resumes goes through Inbox.followDecision.
   function syncPreviewToCursor() {
-    if (!previewOpen || previewMode !== "" || actionBusy || holdAfterAction) return
-    if (cursorUrl === "") {
+    var act = Inbox.followDecision({ open: previewOpen, mode: previewMode, busy: actionBusy,
+      hold: holdAfterAction, cursorUrl: cursorUrl, previewUrl: previewUrl })
+    if (act === "clear") {
+      previewDebounce.stop()
       previewUrl = ""
       previewData = null
       previewStub = null
       previewError = ""
       previewLoading = false
-    } else if (cursorUrl !== previewUrl) {
+    } else if (act === "show") {
       showPreview(cursorUrl, true)
     }
   }
   onPreviewModeChanged: {
     if (previewMode !== "" || !previewOpen || actionBusy) return
     if (holdAfterAction) return
-    if (cursorUrl !== "" && cursorUrl !== previewUrl) showPreview(cursorUrl, true)
+    syncPreviewToCursor()
   }
 
   function togglePreview() {
@@ -635,28 +638,13 @@ Panel {
   // so `p` usually opens on a cache hit.
   onCursorUrlChanged: {
     if (!opened) return
-    // Only a deliberate move releases a held result (see releaseHold).
+    // Only a deliberate move releases a held result (see releaseHold). The
+    // pane switches at once, so c and m only ever act on what is shown, and
+    // only the fetch waits for the cursor to settle; a row with nothing to
+    // preview empties it, so Enter cannot open the previous PR.
     if (holdAfterAction) return
-    // A row with nothing to preview empties the pane rather than leaving
-    // the last PR there for Enter to open; comment and merge keep theirs.
-    if (cursorUrl === "") {
-      previewDebounce.stop()
-      if (previewOpen && previewMode === "" && !actionBusy && cursor >= 0) {
-        previewUrl = ""
-        previewData = null
-        previewStub = null
-        previewError = ""
-        previewLoading = false
-      }
-      return
-    }
-    if (previewOpen && previewMode === "" && !actionBusy) {
-      // The pane switches at once, so c and m can only act on the item the
-      // cursor shows; only the fetch waits for the cursor to settle.
-      showPreview(cursorUrl, true)
-    } else if (!previewOpen) {
-      prefetchTimer.restart()
-    }
+    if (previewOpen) syncPreviewToCursor()
+    else prefetchTimer.restart()
   }
   Timer {
     id: previewDebounce
@@ -1368,6 +1356,8 @@ Panel {
     // A comment or merge still running, or finished while the panel was
     // closed, keeps its pane so its outcome is seen.
     var keepPane = previewOpen && (actionBusy || actionUnseen)
+    // The cursor reset below must not empty the pane being kept.
+    if (keepPane && !actionBusy) holdAfterAction = true
     actionUnseen = false
     if (!keepPane) {
       previewOpen = false

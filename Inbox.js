@@ -179,3 +179,14 @@ function commentKey(k) {
   if (k.enter && k.ctrl) return k.repeat ? "swallow" : "submit"
   return ""
 }
+
+// What the open preview does when the cursor's item changes or following
+// resumes (after a cancel or a released hold): "show" the cursor's item,
+// "clear" when it has nothing to preview, "none" while held, busy, in an
+// action, or already there. Enter must never open an item the cursor is
+// not on.
+function followDecision(st) {
+  if (!st.open || st.mode !== "" || st.busy || st.hold) return "none"
+  if (st.cursorUrl === "") return st.previewUrl === "" ? "none" : "clear"
+  return st.cursorUrl === st.previewUrl ? "none" : "show"
+}
