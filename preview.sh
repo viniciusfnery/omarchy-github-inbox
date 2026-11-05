@@ -137,6 +137,8 @@ merge)
   out=$(gh api --method PUT "repos/$owner/$repo/pulls/$number/merge" -f merge_method="$method" -f sha="$sha" 2>&1) ||
     fail "GitHub refused the merge: $(jq -r '.message // empty' <<<"${out%%$'\n'gh:*}" 2>/dev/null || echo "${out%%$'\n'*}")"
   [[ $(jq -r '.merged // false' <<<"$out" 2>/dev/null) == true ]] || fail "GitHub did not merge it"
+  # The inbox changed: drop its 60s cache so the next refresh asks GitHub.
+  rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-github-tasks.json"
   echo '{"ok": true}'
   ;;
 *)

@@ -577,9 +577,12 @@ Panel {
   // After a finished comment or merge the pane stays on its item, notice
   // and all, until the user moves; only a cancel catches up at once.
   property bool holdAfterAction: false
+  // Deliberate moves (keys, pointer) stamp lastUserMoveAt. A cursor change
+  // without one (a refresh removed the merged PR, say) keeps the result.
+  property double lastUserMoveAt: 0
   onPreviewModeChanged: {
     if (previewMode !== "" || !previewOpen || actionBusy) return
-    if (holdAfterAction) { holdAfterAction = false; return }
+    if (holdAfterAction) return
     if (cursorUrl !== "" && cursorUrl !== previewUrl) showPreview(cursorUrl, true)
   }
 
@@ -600,6 +603,7 @@ Panel {
 
   function closePreview() {
     if (actionBusy) return
+    holdAfterAction = false
     previewOpen = false
     previewMode = ""
     keyCatcher.forceActiveFocus()
@@ -611,6 +615,10 @@ Panel {
   // so `p` usually opens on a cache hit.
   onCursorUrlChanged: {
     if (!opened) return
+    if (holdAfterAction) {
+      if (Date.now() - lastUserMoveAt > 300) return
+      holdAfterAction = false
+    }
     // A row with nothing to preview empties the pane rather than leaving
     // the last PR there for Enter to open; comment and merge keep theirs.
     if (cursorUrl === "") {
@@ -1127,6 +1135,7 @@ Panel {
   }
 
   function moveCursor(delta) {
+    lastUserMoveAt = Date.now()
     if (rowCount === 0) return
     hoverGate.reset()
     cursorFromKeyboard = true
@@ -1146,6 +1155,7 @@ Panel {
   }
 
   function jumpSection(direction) {
+    lastUserMoveAt = Date.now()
     var starts = sectionStarts()
     if (starts.length === 0) return
     hoverGate.reset()
@@ -1252,8 +1262,13 @@ Panel {
     root.close()
   }
 
+  // A refresh asked for while one runs (a merge just landed) runs after it,
+  // so the list never keeps showing what the pane says is merged.
+  property bool refreshQueued: false
+
   function refreshNow() {
-    if (!fetchProcess.running) fetchProcess.running = true
+    if (fetchProcess.running) refreshQueued = true
+    else fetchProcess.running = true
     if (previewOpen && previewMode === "") reloadPreview()
   }
 
@@ -1334,7 +1349,6 @@ Panel {
     // closed, keeps its pane so its outcome is seen.
     var keepPane = previewOpen && (actionBusy || actionUnseen)
     actionUnseen = false
-    if (keepPane && previewMode === "comment" && !actionBusy) Qt.callLater(function() { previewPane.focusComment() })
     if (!keepPane) {
       previewOpen = false
       previewMode = ""
@@ -1354,7 +1368,11 @@ Panel {
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
     refreshNow()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    // One focus choice: a restored comment box, otherwise the list.
+    Qt.callLater(function() {
+      if (root.previewOpen && root.previewMode === "comment" && !root.actionBusy) previewPane.focusComment()
+      else keyCatcher.forceActiveFocus()
+    })
   }
 
   // Filters synthetic hover churn while keyboard scrolling moves rows under
@@ -1416,6 +1434,10 @@ Panel {
   Process {
     id: fetchProcess
     running: false
+    onRunningChanged: if (!running && root.refreshQueued) {
+      root.refreshQueued = false
+      Qt.callLater(root.refreshNow)
+    }
     command: ["bash", root.scriptPath,
       "--mentions", String(Math.max(1, Number(root.setting("mentionLimit", 30)))),
       "--closed-days", String(Math.max(1, Number(root.setting("closedDays", 30))))]
@@ -1563,7 +1585,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: root.previewOpen && root.previewMode === "comment" && !root.actionBusy ? previewPane.commentEditor : keyCatcher
     // The preview pane widens the panel; the bar keeps it on screen, so it
     // grows away from the screen edge.
     contentWidth: panel.fittedContentWidth(Style.space(400) + (root.previewOpen && root.paneFits ? Style.space(452) : 0))
@@ -2716,6 +2738,7 @@ Panel {
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       onPositionChanged: function(mouse) {
         if (!hoverGate.moved(rowMouse, mouse)) return
+        root.lastUserMoveAt = Date.now()
         // Handing over from the keyboard: the row it opened stays open as
         // lingering, so the switch itself moves nothing.
         if (root.cursorFromKeyboard) root.lingerOpenRow()

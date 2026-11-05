@@ -171,3 +171,11 @@ function undismissed(list, dismissed) {
   }
   return out
 }
+
+// What a key in the comment box does. A held Ctrl+Enter repeats; after a
+// failed post that repeat would post again, so it is swallowed.
+function commentKey(k) {
+  if (k.escape) return "cancel"
+  if (k.enter && k.ctrl) return k.repeat ? "swallow" : "submit"
+  return ""
+}

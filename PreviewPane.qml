@@ -23,13 +23,14 @@ Item {
   readonly property var d: inbox.previewData || inbox.previewStub
   readonly property bool isPr: d !== null && d.kind === "pr"
 
-  implicitHeight: content.implicitHeight + actions.implicitHeight + Style.space(12)
+  implicitHeight: (header.visible ? header.height + Style.space(10) : 0) + content.implicitHeight + actions.implicitHeight + Style.space(12)
 
   // Half a page per press, gliding, the way Ctrl+d and Ctrl+u move in vim.
   readonly property real maxScroll: Math.max(0, flick.contentHeight - flick.height)
   readonly property bool moreBelow: flick.contentY < maxScroll - 1
 
   function focusComment() { commentBox.forceActiveFocus() }
+  readonly property alias commentEditor: commentBox
 
   function scrollBy(direction) {
     scrollGlide.stop()
@@ -124,11 +125,94 @@ Item {
     color: inbox.alpha(inbox.foreground, 0.12)
   }
 
+    // ---------- Header: kind, repo and number, state ----------
+    Item {
+      id: header
+      // Pinned above the scrolling content, so the item an action is about
+      // and the way out (Back, Close) are always in view.
+      visible: pane.d !== null || pane.solo
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.rightMargin: Style.space(8)
+      anchors.top: parent.top
+      height: Math.max(headerText.implicitHeight, statePill.implicitHeight, backButton.implicitHeight, closeButton.implicitHeight)
+
+      PanelActionButton {
+        id: backButton
+        visible: pane.solo
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: ""
+        tooltipText: "Back to the list (p)"
+        enabled: !pane.inbox.actionBusy
+        foreground: pane.inbox.dim
+        hoverColor: pane.inbox.foreground
+        fontFamily: pane.inbox.fontFamily
+        onClicked: pane.inbox.closePreview()
+      }
+
+      Text {
+        id: headerText
+        anchors.left: backButton.visible ? backButton.right : parent.left
+        anchors.leftMargin: backButton.visible ? Style.space(6) : 0
+        anchors.right: statePill.visible ? statePill.left : parent.right
+        anchors.rightMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        text: pane.d ? (pane.isPr ? "  " : "  ")
+          + String(pane.d.url).replace(/^https:\/\/github\.com\//, "").replace(/\/(pull|issues)\/(\d+)$/, " #$2") : ""
+        textFormat: Text.PlainText
+        color: pane.inbox.dim
+        font.family: pane.inbox.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+
+      PanelActionButton {
+        id: closeButton
+        visible: !pane.solo
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: "󰅖"
+        tooltipText: "Close the preview (p)"
+        enabled: !pane.inbox.actionBusy
+        foreground: pane.inbox.dim
+        hoverColor: pane.inbox.foreground
+        fontFamily: pane.inbox.fontFamily
+        onClicked: pane.inbox.closePreview()
+      }
+
+      BorderSurface {
+        id: statePill
+        visible: pane.full
+        anchors.right: closeButton.visible ? closeButton.left : parent.right
+        anchors.rightMargin: closeButton.visible ? Style.space(6) : 0
+        anchors.verticalCenter: parent.verticalCenter
+        implicitWidth: stateText.implicitWidth + Style.space(14)
+        implicitHeight: stateText.implicitHeight + Style.space(4)
+        radius: Style.cornerRadius
+        color: "transparent"
+        borderSpec: Border.flat(pane.inbox.alpha(pane.stateColor(pane.d ? pane.d.state : ""), 0.6), 1)
+
+        Text {
+          id: stateText
+          anchors.centerIn: parent
+          text: pane.d ? String(pane.d.state).charAt(0) + String(pane.d.state).slice(1).toLowerCase() : ""
+          textFormat: Text.PlainText
+          color: pane.stateColor(pane.d ? pane.d.state : "")
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+      }
+    }
+
+
   Flickable {
     id: flick
     anchors.left: parent.left
     anchors.right: parent.right
-    anchors.top: parent.top
+    anchors.top: header.visible ? header.bottom : parent.top
+    anchors.topMargin: header.visible ? Style.space(10) : 0
     anchors.bottom: actions.top
     anchors.bottomMargin: Style.space(4)
     contentWidth: width
@@ -156,68 +240,6 @@ Item {
         font.pixelSize: Style.font.body
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.Wrap
-      }
-
-      // ---------- Header: kind, repo and number, state ----------
-      Item {
-        // In single-column mode this row carries Back, so it stays even
-        // when there is nothing to preview.
-        visible: pane.d !== null || pane.solo
-        width: parent.width
-        implicitHeight: Math.max(headerText.implicitHeight, statePill.implicitHeight, backButton.visible ? backButton.implicitHeight : 0)
-
-        PanelActionButton {
-          id: backButton
-          visible: pane.solo
-          anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-          iconText: ""
-          tooltipText: "Back to the list (p)"
-          enabled: !pane.inbox.actionBusy
-          foreground: pane.inbox.dim
-          hoverColor: pane.inbox.foreground
-          fontFamily: pane.inbox.fontFamily
-          onClicked: pane.inbox.closePreview()
-        }
-
-        Text {
-          id: headerText
-          anchors.left: backButton.visible ? backButton.right : parent.left
-          anchors.leftMargin: backButton.visible ? Style.space(6) : 0
-          anchors.right: statePill.visible ? statePill.left : parent.right
-          anchors.rightMargin: Style.space(8)
-          anchors.verticalCenter: parent.verticalCenter
-          text: pane.d ? (pane.isPr ? "  " : "  ")
-            + String(pane.d.url).replace(/^https:\/\/github\.com\//, "").replace(/\/(pull|issues)\/(\d+)$/, " #$2") : ""
-          textFormat: Text.PlainText
-          color: pane.inbox.dim
-          font.family: pane.inbox.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
-
-        BorderSurface {
-          id: statePill
-          visible: pane.full
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          implicitWidth: stateText.implicitWidth + Style.space(14)
-          implicitHeight: stateText.implicitHeight + Style.space(4)
-          radius: Style.cornerRadius
-          color: "transparent"
-          borderSpec: Border.flat(pane.inbox.alpha(pane.stateColor(pane.d ? pane.d.state : ""), 0.6), 1)
-
-          Text {
-            id: stateText
-            anchors.centerIn: parent
-            text: pane.d ? String(pane.d.state).charAt(0) + String(pane.d.state).slice(1).toLowerCase() : ""
-            textFormat: Text.PlainText
-            color: pane.stateColor(pane.d ? pane.d.state : "")
-            font.family: pane.inbox.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-          }
-        }
       }
 
       // ---------- Title and meta ----------
@@ -580,15 +602,17 @@ Item {
             borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, commentBox.activeFocus ? 0.5 : 0.25), 1)
           }
           onActiveFocusChanged: pane.inbox.commentFocused = activeFocus
+          // The decision lives in Inbox.commentKey, where it is tested.
           Keys.onPressed: function(event) {
-            if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && (event.modifiers & Qt.ControlModifier)) {
-              // A held Ctrl+Enter must not post again after a failure.
-              if (!event.isAutoRepeat) pane.inbox.sendComment(commentBox.text)
-              event.accepted = true
-            } else if (event.key === Qt.Key_Escape) {
-              pane.inbox.previewMode = ""
-              event.accepted = true
-            }
+            var action = Inbox.commentKey({
+              enter: event.key === Qt.Key_Return || event.key === Qt.Key_Enter,
+              ctrl: (event.modifiers & Qt.ControlModifier) !== 0,
+              escape: event.key === Qt.Key_Escape,
+              repeat: event.isAutoRepeat
+            })
+            if (action === "submit") pane.inbox.sendComment(commentBox.text)
+            else if (action === "cancel" && !pane.inbox.actionBusy) pane.inbox.previewMode = ""
+            if (action !== "") event.accepted = true
           }
         }
       }

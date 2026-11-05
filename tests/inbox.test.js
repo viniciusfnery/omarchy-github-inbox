@@ -138,6 +138,15 @@ t("alerts: a key that left and came back alerts again", () => {
   eq(r.fresh.map(x => x.key), ["k1"])
 })
 
+t("comment keys: Ctrl+Enter posts once; its auto-repeat is swallowed, never posted", () => {
+  assert.strictEqual(I.commentKey({ enter: true, ctrl: true, repeat: false }), "submit")
+  // After a failed post, a still-held Ctrl+Enter must not post again.
+  assert.strictEqual(I.commentKey({ enter: true, ctrl: true, repeat: true }), "swallow")
+  assert.strictEqual(I.commentKey({ enter: true, ctrl: false, repeat: false }), "")
+  assert.strictEqual(I.commentKey({ escape: true }), "cancel")
+  assert.strictEqual(I.commentKey({}), "")
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

@@ -351,6 +351,13 @@ bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main 
 t "preview: merge is the immediate REST merge, pinned to the head shown" \
   "$(grep -qxF 'api --method PUT repos/acme/repo1/pulls/7/merge -f merge_method=squash -f sha=abc123' "$FAKE_GH_LOG" && ! grep -q 'pr merge' "$FAKE_GH_LOG" && echo true || echo false)"
 
+# A merge changes the inbox: the 60s cache must not serve the PR again.
+fresh_env
+echo '{"baseRefName": "main", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_GH_FIXTURES/pr-view.json"
+echo '{"cached": true}' >"$CACHE"
+bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main >/dev/null
+t "preview: a merge drops the inbox cache" "$([[ ! -e $CACHE ]] && echo true || echo false)"
+
 # A base that requires a merge queue must fail, never queue or turn on
 # auto-merge behind a "Merged".
 fresh_env
