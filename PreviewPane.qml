@@ -10,6 +10,8 @@ Item {
   id: pane
 
   required property var inbox
+  // Which side of the list the pane sits on: its divider goes between them.
+  property bool onLeft: false
   // Full data once gh answers. Before that, the row's own title and number,
   // so the pane is never empty while it loads.
   readonly property bool full: inbox.previewData !== null
@@ -45,6 +47,31 @@ Item {
   // Bodies are markdown, shown as plain text (never rendered, so nothing in
   // them can become markup): HTML comments, heading marks, emphasis marks
   // and runs of blank lines go.
+  // The description as heading and paragraph blocks, at most 12.
+  readonly property var bodyBlocks: {
+    if (!full) return []
+    var lines = String(d.body || "").replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
+    var blocks = []
+    var para = []
+    function flush() {
+      var t = para.join("\n").replace(/(\*\*|__)(.+?)\1/g, "$2").trim()
+      if (t !== "") blocks.push({ heading: false, text: t })
+      para = []
+    }
+    for (var i = 0; i < lines.length && blocks.length < 12; i++) {
+      // Table rows read as "a · b · c"; the |---| rule under the head goes.
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(lines[i])) continue
+      if (/^\s*\|.*\|\s*$/.test(lines[i]))
+        lines[i] = lines[i].trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · ")
+      var m = /^#{1,6}\s+(.*)$/.exec(lines[i])
+      if (m) { flush(); blocks.push({ heading: true, text: m[1].replace(/(\*\*|__)(.+?)\1/g, "$2").trim() }) }
+      else if (lines[i].trim() === "") flush()
+      else para.push(lines[i])
+    }
+    flush()
+    return blocks.slice(0, 12)
+  }
+
   function plainBody(text) {
     return String(text || "").replace(/\r/g, "")
       .replace(/<!--[\s\S]*?-->/g, "")
@@ -55,10 +82,9 @@ Item {
   }
 
   Rectangle {
-    anchors.left: parent.left
+    x: pane.onLeft ? parent.width + Style.space(6) : -Style.space(7)
     anchors.top: parent.top
     anchors.bottom: parent.bottom
-    anchors.leftMargin: -Style.space(7)
     width: 1
     color: inbox.alpha(inbox.foreground, 0.12)
   }
@@ -69,7 +95,7 @@ Item {
     anchors.right: parent.right
     anchors.top: parent.top
     anchors.bottom: actions.top
-    anchors.bottomMargin: Style.space(8)
+    anchors.bottomMargin: Style.space(4)
     contentWidth: width
     contentHeight: content.implicitHeight
     clip: true
@@ -154,26 +180,36 @@ Item {
         wrapMode: Text.Wrap
       }
 
-      Text {
+      // Who and when, then where and how big, each on its own line so a
+      // long branch name elides instead of wrapping the line apart.
+      Column {
         visible: pane.full
         width: parent.width
-        text: {
-          if (!pane.full) return ""
-          var parts = ["@" + pane.d.author, "opened " + pane.ago(pane.d.createdAt)]
-          if (pane.isPr) {
-            parts.push(pane.d.base + " ← " + pane.d.head)
-            parts.push("+" + pane.d.additions + " −" + pane.d.deletions + " in " + pane.d.changedFiles
-              + (pane.d.changedFiles === 1 ? " file" : " files"))
-          } else if (pane.d.assignees && pane.d.assignees.length > 0) {
-            parts.push("assigned to " + pane.d.assignees.map(function(a) { return "@" + a }).join(", "))
-          }
-          return parts.join(" · ")
+        spacing: Style.space(2)
+
+        Text {
+          width: parent.width
+          text: pane.full ? "@" + pane.d.author + " · opened " + pane.ago(pane.d.createdAt)
+            + (!pane.isPr && pane.d.assignees && pane.d.assignees.length > 0
+              ? " · assigned to " + pane.d.assignees.map(function(a) { return "@" + a }).join(", ") : "") : ""
+          textFormat: Text.PlainText
+          color: pane.inbox.dim
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
-        textFormat: Text.PlainText
-        color: pane.inbox.dim
-        font.family: pane.inbox.fontFamily
-        font.pixelSize: Style.font.caption
-        wrapMode: Text.Wrap
+
+        Text {
+          visible: pane.isPr
+          width: parent.width
+          text: pane.full && pane.isPr ? pane.d.base + " ← " + pane.d.head + " · +" + pane.d.additions
+            + " −" + pane.d.deletions + " in " + pane.d.changedFiles + (pane.d.changedFiles === 1 ? " file" : " files") : ""
+          textFormat: Text.PlainText
+          color: pane.inbox.dim
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideMiddle
+        }
       }
 
       // ---------- Status: checks, review, merge ----------
@@ -265,16 +301,33 @@ Item {
       }
 
       Text {
-        visible: pane.full
+        visible: pane.full && pane.bodyBlocks.length === 0
         width: parent.width
-        text: pane.full ? (pane.plainBody(pane.d.body) || "No description.") : ""
+        text: "No description."
         textFormat: Text.PlainText
-        color: pane.full && pane.plainBody(pane.d.body) !== "" ? pane.inbox.foreground : pane.inbox.dim
+        color: pane.inbox.dim
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.bodySmall
-        wrapMode: Text.Wrap
-        maximumLineCount: 14
-        elide: Text.ElideRight
+      }
+
+      // Markdown headings become bold lines; everything stays PlainText.
+      Repeater {
+        model: pane.full ? pane.bodyBlocks : []
+
+        Text {
+          required property var modelData
+          width: content.width
+          topPadding: modelData.heading ? Style.space(4) : 0
+          text: modelData.text
+          textFormat: Text.PlainText
+          color: pane.inbox.foreground
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.bold: modelData.heading
+          wrapMode: Text.Wrap
+          maximumLineCount: modelData.heading ? 2 : 8
+          elide: Text.ElideRight
+        }
       }
 
       // ---------- Comments ----------
@@ -331,6 +384,13 @@ Item {
     anchors.rightMargin: Style.space(8)
     spacing: Style.space(8)
     visible: pane.d !== null
+
+    // Where the scrolling content is cut, so the cut reads as an edge.
+    Rectangle {
+      width: parent.width
+      height: 1
+      color: pane.inbox.alpha(pane.inbox.foreground, 0.12)
+    }
 
     Text {
       visible: pane.inbox.previewNotice !== ""

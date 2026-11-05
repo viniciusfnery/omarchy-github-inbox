@@ -530,6 +530,17 @@ Panel {
   property bool actionBusy: false
   property string mergeMethod: ""
   property bool commentFocused: false
+
+  // The panel is kept on screen, so with the chip on the right half of the
+  // bar it grows to the left. The pane goes on that side so the list stays
+  // still while the panel widens. Read when the pane opens, not live.
+  property bool paneOnLeft: true
+  property real listWidth: Style.space(400)
+
+  function pickPaneSide() {
+    var w = panel.screenW
+    paneOnLeft = w <= 0 || panel.anchorScreenPos.x + panel.anchorW / 2 > w / 2
+  }
   property int commentSerial: 0
 
   function focusList() { keyCatcher.forceActiveFocus() }
@@ -550,6 +561,7 @@ Panel {
 
   function openPreview() {
     if (cursorUrl === "") return
+    if (!previewOpen) pickPaneSide()
     previewOpen = true
     showPreview(cursorUrl)
   }
@@ -1378,7 +1390,7 @@ Panel {
     focusTarget: keyCatcher
     // The preview pane widens the panel; the bar keeps it on screen, so it
     // grows away from the screen edge.
-    contentWidth: panel.fittedContentWidth(Style.space(root.previewOpen ? 852 : 400))
+    contentWidth: panel.fittedContentWidth(Style.space(400) + (root.previewOpen ? Style.space(452) : 0))
     contentHeight: panel.fittedContentHeight(Math.max(column.implicitHeight,
         root.previewOpen ? previewPane.implicitHeight : 0) + hintBar.implicitHeight
       + (failureLine.visible ? failureLine.implicitHeight : 0), Style.space(root.previewOpen ? 720 : 640))
@@ -1389,6 +1401,9 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       blocked: searchField.activeFocus || root.commentFocused
+      // The list's width with the pane closed, kept while it is open so
+      // the list does not change size or move as the panel widens.
+      onWidthChanged: if (!root.previewOpen) root.listWidth = width
 
       onMoveRequested: function(dx, dy) {
         // Choosing how to merge: left and right pick the method, nothing moves.
@@ -1463,9 +1478,11 @@ Panel {
       PreviewPane {
         id: previewPane
         inbox: root
-        anchors.left: panelFlick.right
-        anchors.leftMargin: Style.space(12)
-        anchors.right: parent.right
+        onLeft: root.paneOnLeft
+        anchors.left: root.paneOnLeft ? parent.left : panelFlick.right
+        anchors.leftMargin: root.paneOnLeft ? 0 : Style.space(12)
+        anchors.right: root.paneOnLeft ? panelFlick.left : parent.right
+        anchors.rightMargin: root.paneOnLeft ? Style.space(12) : 0
         anchors.top: parent.top
         anchors.bottom: panelFlick.bottom
         visible: width > Style.space(40)
@@ -1521,8 +1538,11 @@ Panel {
 
       Flickable {
         id: panelFlick
-        anchors.left: parent.left
-        width: Math.min(parent.width, Style.space(400))
+        // The list keeps its place on screen: it sits on the side the panel
+        // does not grow toward, and the pane opens on the other.
+        anchors.left: root.paneOnLeft ? undefined : parent.left
+        anchors.right: root.paneOnLeft ? parent.right : undefined
+        width: root.previewOpen ? root.listWidth : parent.width
         anchors.top: parent.top
         anchors.bottom: failureLine.visible ? failureLine.top : hintBar.top
         contentWidth: width
