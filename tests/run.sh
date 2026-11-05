@@ -304,7 +304,7 @@ fresh_env
 reason() { FAKE_GH_PREVIEW_ERR="$1" bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7" | jq -r .error; }
 verdicts="$(reason 'HTTP 401: Bad credentials (https://api.github.com/graphql)')|$(reason 'GraphQL: Could not resolve to a PullRequest with the number of 7. (repository.pullRequest)')|$(reason 'error connecting to api.github.com')|$(reason 'GraphQL: API rate limit exceeded for user ID 1.')|$(reason 'something odd')"
 t "preview: failures name the cause: sign-in, missing, offline, rate limit, other" \
-  "$([[ $verdicts == *"gh auth login"*"|"*"does not exist"*"|"*"unreachable"*"|"*"rate limit"*"|"*"something odd"* ]] && echo true || echo false)"
+  "$([[ $verdicts == *"gh auth login"*"|"*"This PR does not exist"*"|"*"unreachable"*"|"*"rate limit"*"|"*"something odd"* ]] && echo true || echo false)"
 
 fresh_env
 export FAKE_GH_PREVIEW_FAIL=1

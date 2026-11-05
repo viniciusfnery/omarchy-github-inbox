@@ -23,6 +23,7 @@ owner=${BASH_REMATCH[1]}
 repo=${BASH_REMATCH[2]}
 number=${BASH_REMATCH[4]}
 kind=$([[ ${BASH_REMATCH[3]} == pull ]] && echo pr || echo issue)
+noun=$([[ $kind == pr ]] && echo PR || echo issue)
 
 case $verb in
 view)
@@ -54,15 +55,15 @@ view)
     err=$(head -c 500 "$errfile" | head -n 1)
     case $err in
     *"Bad credentials"* | *"HTTP 401"* | *"auth login"*) fail "Not signed in to GitHub: run gh auth login" ;;
-    *"Could not resolve to a"* | *"HTTP 404"* | *"NOT_FOUND"*) fail "This $kind does not exist, or you cannot see it" ;;
+    *"Could not resolve to a"* | *"HTTP 404"* | *"NOT_FOUND"*) fail "This $noun does not exist, or you cannot see it" ;;
     *"rate limit"*) fail "GitHub rate limit reached, try again in a minute" ;;
     *"connecting to"* | *"no such host"* | *"timeout"* | *"network"*) fail "GitHub is unreachable: check the connection" ;;
-    *) fail "GitHub did not return this $kind: ${err:-no details}" ;;
+    *) fail "GitHub did not return this $noun: ${err:-no details}" ;;
     esac
   }
   # gh output is bounded here, before jq ever sees it, and goes in on stdin.
   (( ${#json} <= 2097152 )) || fail "GitHub data unexpectedly large"
-  jq -e '.data.repository.item | type == "object"' >/dev/null 2>&1 <<<"$json" || fail "GitHub did not return this $kind"
+  jq -e '.data.repository.item | type == "object"' >/dev/null 2>&1 <<<"$json" || fail "GitHub did not return this $noun"
   jq --arg kind "$kind" '
     def cut($n): (. // "") | if length > $n then .[0:$n] + "…" else . end;
     def login: ((. // {}).login // "");
@@ -133,7 +134,7 @@ merge)
   # read again right before the merge, leaving a window of about a second.
   # The REST merge endpoint merges now or fails: it never joins a merge
   # queue or turns on auto-merge, as `gh pr merge` would on such a base.
-  now=$(gh pr view "$url" --json baseRefName,headRefOid,state 2>/dev/null) || fail "GitHub did not return this pr"
+  now=$(gh pr view "$url" --json baseRefName,headRefOid,state 2>/dev/null) || fail "GitHub did not return this PR"
   now_base=$(jq -r '.baseRefName // ""' <<<"$now" 2>/dev/null)
   [[ $now_base == "$base" ]] || fail "This PR now targets ${now_base:-another branch}, not $base. Review it again."
   [[ $(jq -r '.headRefOid // ""' <<<"$now" 2>/dev/null) == "$sha" ]] || fail "New commits arrived. Review them, then merge again."

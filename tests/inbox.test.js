@@ -216,6 +216,24 @@ t("quotes: quoted lines in a description are their own quote blocks", () => {
   eq(b.map(x => (x.quote ? "> " : "") + x.text), ["Bumps lib.", "> Release notes\nfixed a bug", "Mine again"])
 })
 
+t("dependabot: HTML blockquote, headings and list items read as quoted headings and bullets", () => {
+  const body = "Bumps [actions/checkout](https://github.com/actions/checkout) from 3 to 4.\n<details>\n<summary>Release notes</summary>\n<p><em>Sourced from <a href=\"https://x\">releases</a>.</em></p>\n<blockquote>\n<h2>v4.0.0</h2>\n<h2>What's Changed</h2>\n<ul>\n<li>Update default runtime to node20</li>\n<li>Support fetching without the <code>--progress</code> option</li>\n</ul>\n</blockquote>\n</details>"
+  const b = I.bodyBlocks(body, 20)
+  eq(b.map(x => (x.quote ? "> " : "") + (x.heading ? "# " : "") + x.bullet + "|" + x.text), [
+    "|Bumps actions/checkout from 3 to 4.\nRelease notes\nSourced from releases.",
+    "> # |v4.0.0", "> # |What's Changed",
+    "> •|Update default runtime to node20", "> •|Support fetching without the --progress option"])
+})
+t("hard wraps: a run-on line joins the next with a space; short lines keep their break", () => {
+  const long = "This change moves the cache into its own module so that the panel and"
+  const b = I.bodyBlocks(long + "\nthe script share one place for it.\nShort line\nNext line")
+  eq(b.map(x => x.text), [long + " the script share one place for it.\nShort line\nNext line"])
+})
+t("lists: an indented line after a heading or table row is not glued to the list item", () => {
+  const b = I.bodyBlocks("- a\n## H\n  x")
+  eq(b.map(x => x.text), ["a", "H", "x"])
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

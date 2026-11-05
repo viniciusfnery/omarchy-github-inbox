@@ -218,43 +218,43 @@ function cleanLine(line) {
 }
 
 // The description as blocks for the pane: headings, paragraphs, list
-// items with their depth (so a wrapped item keeps its indent), and table
-// rows as "a · b · c". Code fences keep their content and lose the fence.
-// Input is cut to 4000 characters first: the regexes are quadratic on
-// unclosed brackets, and 200 KB of them once took 23 s.
+// items with their depth (so a wrapped item keeps its indent), table rows
+// as "a · b · c", and quotes. Markdown and the HTML bots write instead
+// (Dependabot's <blockquote>, <h2> and <li>) are read the same way. Code
+// fences keep their content and lose the fence. Input is cut to 4000
+// characters first: the regexes are quadratic on unclosed brackets, and
+// 200 KB of them once took 23 s.
 function bodyBlocks(text, maxBlocks) {
   var max = maxBlocks || 12
   var lines = String(text || "").slice(0, 4000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
   var blocks = []
   var para = []
   var paraQuote = false
+  var htmlQuote = false
   var inList = false
-  function block(heading, txt, bullet, indent) {
-    blocks.push({ heading: heading, text: txt, bullet: bullet, indent: indent })
+  // Every block made inside a quote is marked, so quoted release notes in
+  // a bot's PR never read as the author's words.
+  function block(heading, txt, bullet, indent, quote) {
+    var b = { heading: heading, text: txt, bullet: bullet, indent: indent }
+    if (quote) b.quote = true
+    blocks.push(b)
   }
-  // Quoted lines (release notes in a bot's PR, say) are blocks of their
-  // own, marked quote, so they never read as the author's words.
+  // Hard-wrapped prose (commit-style bodies at about 72 columns) joins up:
+  // a long line that does not end a sentence runs on into the next. Short
+  // lines keep their break, so deliberate line breaks survive.
   function flush() {
-    var t = para.join("\n").trim()
-    if (t !== "") {
-      block(false, t, "", 0)
-      if (paraQuote) blocks[blocks.length - 1].quote = true
+    var t = ""
+    for (var k = 0; k < para.length; k++) {
+      var prev = k > 0 ? para[k - 1] : ""
+      var runOn = prev.length > 60 && !/[.!?:]$|  $/.test(prev)
+      t += k === 0 ? para[k] : (runOn ? " " : "\n") + para[k]
     }
+    t = t.trim()
+    if (t !== "") block(false, t, "", 0, paraQuote || htmlQuote)
     para = []
   }
   for (var i = 0; i < lines.length && blocks.length < max; i++) {
     var raw = lines[i]
-    if (/^\s*```/.test(raw)) continue
-    if (/^\s*([-*_]\s*){3,}$/.test(raw)) continue
-    if (/^\s*\|[\s:|-]+\|\s*$/.test(raw)) continue
-    // A table row the 1200-character cut ended early has no closing pipe.
-    if (/^\s*\|/.test(raw)) {
-      flush()
-      block(false, cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · "), "", 0)
-      continue
-    }
-    var h = /^#{1,6}\s+(.*)$/.exec(raw)
-    if (h) { flush(); block(true, cleanLine(h[1]).trim(), "", 0); continue }
     var li = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(raw)
     // An indented line right under a list item continues it (hard wrap).
     if (!li && inList && /^\s+\S/.test(raw) && blocks.length > 0) {
@@ -262,20 +262,44 @@ function bodyBlocks(text, maxBlocks) {
       last.text = (last.text + " " + cleanLine(raw).trim()).trim()
       continue
     }
-    inList = !!li
-    if (li) {
-      flush()
-      var indent = Math.min(4, Math.floor(li[1].length / 2))
-      var box = /^\[( |x|X)\]\s+(.*)$/.exec(li[3])
-      if (box) block(false, cleanLine(box[2]).trim(), box[1] === " " ? "☐" : "☑", indent)
-      else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent)
+    inList = false
+    if (/<blockquote\b/i.test(raw)) { flush(); htmlQuote = true }
+    var closesQuote = /<\/blockquote>/i.test(raw)
+    if (/^\s*```/.test(raw) || /^\s*([-*_]\s*){3,}$/.test(raw) || /^\s*\|[\s:|-]+\|\s*$/.test(raw)) {
+      if (closesQuote) { flush(); htmlQuote = false }
       continue
     }
-    var quoted = /^\s*>/.test(raw)
-    var line = cleanLine(raw.replace(/^\s*>\s?/, ""))
-    if (line.trim() === "") { flush(); continue }
-    if (quoted !== paraQuote) { flush(); paraQuote = quoted }
-    para.push(line)
+    var htmlHeading = /^\s*<h[1-6]\b[^>]*>(.*)<\/h[1-6]>\s*$/i.exec(raw)
+    var htmlItem = /^\s*<li\b[^>]*>(.*?)(<\/li>)?\s*$/i.exec(raw)
+    // A table row the 1200-character cut ended early has no closing pipe.
+    if (/^\s*\|/.test(raw)) {
+      flush()
+      block(false, cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · "), "", 0, htmlQuote)
+    } else if (/^#{1,6}\s+/.test(raw) || htmlHeading) {
+      flush()
+      block(true, cleanLine(htmlHeading ? htmlHeading[1] : raw.replace(/^#{1,6}\s+/, "")).trim(), "", 0, htmlQuote)
+    } else if (li || htmlItem) {
+      flush()
+      inList = !!li
+      if (htmlItem) {
+        block(false, cleanLine(htmlItem[1]).trim(), "•", 0, htmlQuote)
+      } else {
+        var indent = Math.min(4, Math.floor(li[1].length / 2))
+        var box = /^\[( |x|X)\]\s+(.*)$/.exec(li[3])
+        if (box) block(false, cleanLine(box[2]).trim(), box[1] === " " ? "☐" : "☑", indent, htmlQuote)
+        else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent, htmlQuote)
+      }
+    } else {
+      var quoted = /^\s*>/.test(raw)
+      var line = cleanLine(raw.replace(/^\s*>\s?/, ""))
+      // A blank line ends a paragraph; a line that only held tags does not.
+      if (raw.trim() === "") flush()
+      else if (line.trim() !== "") {
+        if (quoted !== paraQuote) { flush(); paraQuote = quoted }
+        para.push(line)
+      }
+    }
+    if (closesQuote) { flush(); htmlQuote = false }
   }
   flush()
   return blocks.slice(0, max)
