@@ -592,7 +592,20 @@ Panel {
   // the pane closed, a row the cursor rests on is fetched in the background,
   // so `p` usually opens on a cache hit.
   onCursorUrlChanged: {
-    if (cursorUrl === "" || !opened) return
+    if (!opened) return
+    // A row with nothing to preview empties the pane rather than leaving
+    // the last PR there for Enter to open; comment and merge keep theirs.
+    if (cursorUrl === "") {
+      previewDebounce.stop()
+      if (previewOpen && previewMode === "" && !actionBusy && cursor >= 0) {
+        previewUrl = ""
+        previewData = null
+        previewStub = null
+        previewError = ""
+        previewLoading = false
+      }
+      return
+    }
     if (previewOpen && previewMode === "" && !actionBusy) {
       if (cachedPreview(cursorUrl, 300000)) showPreview(cursorUrl)
       else previewDebounce.restart()
@@ -808,7 +821,6 @@ Panel {
   // The merge strip freezes what it asks about: URL, number, base and the
   // head commit shown. A refresh landing meanwhile cannot change the target.
   property var mergeTarget: null
-  property double mergeOpenedAt: 0
 
   function startMerge() {
     if (!previewData || actionBusy) return
@@ -816,12 +828,12 @@ Panel {
     previewDebounce.stop()
     mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
     mergeMethod = previewData.mergeMethods[0]
-    mergeOpenedAt = Date.now()
     previewNotice = ""
     previewMode = "merge"
   }
 
   function cycleMergeMethod(delta) {
+    if (actionBusy) return
     var methods = previewData && previewData.mergeMethods ? previewData.mergeMethods : []
     if (methods.length < 2) return
     var i = methods.indexOf(mergeMethod)
@@ -844,11 +856,10 @@ Panel {
     actionProcess.running = true
   }
 
-  // Enter or the button, never a held key: confirmations in the first
-  // 400 ms after the strip opens are ignored, so key repeat cannot pass.
+  // A fresh Enter (the Shortcut rejects repeats) or the button: `m` and
+  // Space never confirm, so a held key cannot open and confirm in one go.
   function confirmMerge() {
     if (actionBusy || previewMode !== "merge" || !mergeTarget) return
-    if (Date.now() - mergeOpenedAt < 400) return
     if (previewData && String(previewData.headSha) !== mergeTarget.sha) {
       previewMode = ""
       notice("New commits arrived since you opened this. Review them, then press m again.", true)
@@ -870,8 +881,11 @@ Panel {
 
   // The pane cannot move on while an action runs (see onCursorUrlChanged
   // and the Esc handling), so its result always lands on its own item.
+  property bool actionUnseen: false
+
   function actionFinished(text) {
     actionBusy = false
+    if (!opened) actionUnseen = true
     var parsed = null
     try { parsed = JSON.parse(text) } catch (e) { parsed = null }
     var kind = actionProcess.kind
@@ -1290,8 +1304,14 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
-    previewOpen = false
-    previewMode = ""
+    // A comment or merge still running, or finished while the panel was
+    // closed, keeps its pane so its outcome is seen.
+    var keepPane = previewOpen && (actionBusy || actionUnseen)
+    actionUnseen = false
+    if (!keepPane) {
+      previewOpen = false
+      previewMode = ""
+    }
     sessionOrgs = Inbox.dict()
     cursorActive = false
     cursor = -1
@@ -1471,6 +1491,20 @@ Panel {
     }
   }
 
+  // The shell centers the panel under its anchor, clamped to the screen.
+  // Shifting the anchor by half the extra width, away from the side the
+  // pane opens on, keeps the list's edge fixed wherever the chip sits; at
+  // a screen edge the clamp already does.
+  Item {
+    id: panelAnchor
+    parent: button
+    width: button.width
+    height: button.height
+    x: (root.paneOnLeft ? -1 : 1) * Math.max(0, panel.contentWidth - root.closedContentWidth) / 2
+  }
+
+  readonly property real closedContentWidth: panel.fittedContentWidth(Style.space(400))
+
   WidgetButton {
     id: button
     anchors.fill: parent
@@ -1498,7 +1532,7 @@ Panel {
 
   KeyboardPanel {
     id: panel
-    anchorItem: button
+    anchorItem: panelAnchor
     owner: root
     bar: root.bar
     open: root.opened

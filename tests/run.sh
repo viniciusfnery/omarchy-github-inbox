@@ -306,6 +306,13 @@ printf 'keep\n\n' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issue
 t "preview: an accepted comment keeps its trailing newlines" \
   "$(grep -qx 'stdin-bytes: 6' "$FAKE_GH_LOG" && echo true || echo false)"
 
+# A write cut short (disk full, a file-size limit) must not post the part
+# that made it to disk.
+fresh_env
+out=$( (ulimit -f 1; head -c 3000 /dev/zero | tr '\0' a | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7") 2>/dev/null)
+t "preview: an interrupted comment write posts nothing" \
+  "$([[ $(jq -r '.error' <<<"$out" 2>/dev/null) != null ]] && ! grep -q 'comment' "$FAKE_GH_LOG" && echo true || echo false)"
+
 # Bash drops NUL bytes in $(...): a NUL must be refused, never let a tail
 # vanish or the count come out short.
 fresh_env
@@ -334,8 +341,18 @@ t "preview: an empty comment is refused" "$(jqt '.error | length > 0' "$out")"
 fresh_env
 echo '{"baseRefName": "main", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_GH_FIXTURES/pr-view.json"
 bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main >/dev/null
-t "preview: merge pins the head commit that was shown" \
-  "$(grep -qxF 'pr merge https://github.com/acme/repo1/pull/7 --squash --match-head-commit abc123' "$FAKE_GH_LOG" && echo true || echo false)"
+t "preview: merge is the immediate REST merge, pinned to the head shown" \
+  "$(grep -qxF 'api --method PUT repos/acme/repo1/pulls/7/merge -f merge_method=squash -f sha=abc123' "$FAKE_GH_LOG" && ! grep -q 'pr merge' "$FAKE_GH_LOG" && echo true || echo false)"
+
+# A base that requires a merge queue must fail, never queue or turn on
+# auto-merge behind a "Merged".
+fresh_env
+echo '{"baseRefName": "main", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_GH_FIXTURES/pr-view.json"
+export FAKE_GH_MERGE_QUEUE=1
+out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main)
+unset FAKE_GH_MERGE_QUEUE
+t "preview: a merge the base will not take now is an error, not a queue" \
+  "$([[ $(jq -r '.error' <<<"$out") == *"merge queue"* ]] && echo true || echo false)"
 
 # The base is not pinned by --match-head-commit: it is rechecked right
 # before merging, and a PR retargeted since the strip opened does not merge.
@@ -343,7 +360,7 @@ fresh_env
 echo '{"baseRefName": "production", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_GH_FIXTURES/pr-view.json"
 out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main)
 t "preview: a PR retargeted to another base is refused" \
-  "$([[ $(jq -r '.error' <<<"$out") == *production* ]] && ! grep -q 'pr merge' "$FAKE_GH_LOG" && echo true || echo false)"
+  "$([[ $(jq -r '.error' <<<"$out") == *production* ]] && ! grep -q 'pulls/7/merge' "$FAKE_GH_LOG" && echo true || echo false)"
 
 fresh_env
 out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" octopus abc123 main)

@@ -42,7 +42,17 @@ shift
 
 # --mark-read side entrance: gh api --method PATCH notifications/threads/<id>
 #   FAKE_GH_PATCH_FAIL=<id> -> that thread's PATCH fails
+#   FAKE_GH_MERGE_QUEUE=1 -> the merge endpoint refuses, as for a queued base
 if [[ ${1:-} == --method ]]; then
+  if [[ ${2:-} == PUT && ${3:-} == repos/*/pulls/*/merge ]]; then
+    if [[ ${FAKE_GH_MERGE_QUEUE:-0} == 1 ]]; then
+      echo '{"message":"Changes must be made through the merge queue","status":"405"}'
+      echo "gh: Changes must be made through the merge queue (HTTP 405)" >&2
+      exit 1
+    fi
+    echo '{"sha":"def456","merged":true,"message":"Pull Request successfully merged"}'
+    exit 0
+  fi
   [[ ${3:-} == "notifications/threads/${FAKE_GH_PATCH_FAIL:-none}" ]] && exit 1
   exit 0
 fi

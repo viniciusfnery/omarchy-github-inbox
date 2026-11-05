@@ -21,6 +21,7 @@ url=${2:-}
   fail "Not a GitHub pull request or issue"
 owner=${BASH_REMATCH[1]}
 repo=${BASH_REMATCH[2]}
+number=${BASH_REMATCH[4]}
 kind=$([[ ${BASH_REMATCH[3]} == pull ]] && echo pr || echo issue)
 
 case $verb in
@@ -45,7 +46,7 @@ view)
         comments(last: 3) { nodes { author { login } createdAt body } } } } }'
   fi
   # Owner and repo as strings (-f): -F would turn a numeric name into an int.
-  json=$(gh api graphql -f query="$q" -f owner="$owner" -f repo="$repo" -F number="${BASH_REMATCH[4]}" 2>/dev/null) ||
+  json=$(gh api graphql -f query="$q" -f owner="$owner" -f repo="$repo" -F number="$number" 2>/dev/null) ||
     fail "GitHub did not return this $kind"
   # gh output is bounded here, before jq ever sees it, and goes in on stdin.
   (( ${#json} <= 2097152 )) || fail "GitHub data unexpectedly large"
@@ -92,8 +93,10 @@ comment)
   # newlines, which once let a long comment through cut short).
   tmp=$(mktemp) || fail "No temporary file"
   trap 'rm -f "$tmp"' EXIT
-  head -c 65537 >"$tmp"
-  size=$(wc -c <"$tmp")
+  # A write cut short (disk full, a file-size limit) must not post the part
+  # that made it to disk.
+  head -c 65537 >"$tmp" || fail "Could not read the comment"
+  size=$(wc -c <"$tmp") || fail "Could not read the comment"
   (( size <= 65536 )) || fail "Comment too long"
   (( $(tr -d '\000' <"$tmp" | wc -c) == size )) || fail "Comment contains a NUL byte"
   [[ -n $(tr -d '[:space:]' <"$tmp" | head -c 1) ]] || fail "Empty comment"
@@ -110,15 +113,18 @@ merge)
   # The head the user looked at: a PR pushed to since then does not merge.
   [[ $sha =~ ^[0-9a-f]{6,40}$ ]] || fail "Missing head commit"
   [[ $base =~ ^[A-Za-z0-9._/-]+$ ]] || fail "Missing base branch"
-  # --match-head-commit pins the head but not the base: check both now, so
-  # a PR retargeted since the confirmation opened does not merge.
+  # GitHub's merge APIs pin the head (sha) but not the base, so the base is
+  # read again right before the merge, leaving a window of about a second.
+  # The REST merge endpoint merges now or fails: it never joins a merge
+  # queue or turns on auto-merge, as `gh pr merge` would on such a base.
   now=$(gh pr view "$url" --json baseRefName,headRefOid,state 2>/dev/null) || fail "GitHub did not return this pr"
   now_base=$(jq -r '.baseRefName // ""' <<<"$now" 2>/dev/null)
   [[ $now_base == "$base" ]] || fail "This PR now targets ${now_base:-another branch}, not $base. Review it again."
   [[ $(jq -r '.headRefOid // ""' <<<"$now" 2>/dev/null) == "$sha" ]] || fail "New commits arrived. Review them, then merge again."
   [[ $(jq -r '.state // ""' <<<"$now" 2>/dev/null) == OPEN ]] || fail "This PR is no longer open"
-  err=$(gh pr merge "$url" "--$method" --match-head-commit "$sha" 2>&1 >/dev/null) ||
-    fail "GitHub refused the merge: ${err%%$'\n'*}"
+  out=$(gh api --method PUT "repos/$owner/$repo/pulls/$number/merge" -f merge_method="$method" -f sha="$sha" 2>&1) ||
+    fail "GitHub refused the merge: $(jq -r '.message // empty' <<<"${out%%$'\n'gh:*}" 2>/dev/null || echo "${out%%$'\n'*}")"
+  [[ $(jq -r '.merged // false' <<<"$out" 2>/dev/null) == true ]] || fail "GitHub did not merge it"
   echo '{"ok": true}'
   ;;
 *)

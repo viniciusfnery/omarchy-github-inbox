@@ -153,7 +153,7 @@ Item {
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.body
         horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.WordWrap
+        wrapMode: Text.Wrap
       }
 
       // ---------- Header: kind, repo and number, state ----------
@@ -344,7 +344,7 @@ Item {
         color: pane.inbox.previewError !== "" ? pane.inbox.urgent : pane.inbox.dim
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.caption
-        wrapMode: Text.WordWrap
+        wrapMode: Text.Wrap
       }
 
       // ---------- Description ----------
@@ -397,7 +397,7 @@ Item {
         font.family: pane.inbox.fontFamily
         font.pixelSize: Style.font.caption
         font.italic: true
-        wrapMode: Text.WordWrap
+        wrapMode: Text.Wrap
       }
 
       // ---------- Comments ----------
@@ -511,7 +511,7 @@ Item {
 
       Text {
         width: Math.min(implicitWidth, parent.width)
-        wrapMode: Text.WordWrap
+        wrapMode: Text.Wrap
         text: pane.inbox.previewStale ? "Could not refresh, this may be out of date" : "Could not load this preview"
         textFormat: Text.PlainText
         color: pane.inbox.urgent
@@ -539,7 +539,7 @@ Item {
       color: pane.inbox.previewNoticeError ? pane.inbox.urgent : pane.inbox.foreground
       font.family: pane.inbox.fontFamily
       font.pixelSize: Style.font.caption
-      wrapMode: Text.WordWrap
+      wrapMode: Text.Wrap
     }
 
     // Comment box: visible only after `c` or the Comment button.
@@ -642,7 +642,7 @@ Item {
           font.family: pane.inbox.fontFamily
           font.pixelSize: Style.font.body
           font.bold: true
-          wrapMode: Text.WordWrap
+          wrapMode: Text.Wrap
         }
 
         Flow {
@@ -789,7 +789,7 @@ Item {
       color: parent.tone
       font.family: pane.inbox.fontFamily
       font.pixelSize: Style.font.bodySmall
-      wrapMode: Text.WordWrap
+      wrapMode: Text.Wrap
     }
   }
 }

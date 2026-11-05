@@ -61,6 +61,10 @@ fresh `Enter` or its Confirm button (never a held key or Space). Merge is offere
 mergeable, uses a method the repo allows, and is pinned to the head commit
 the preview showed, and the base branch is checked again right before
 merging, so a PR pushed to or retargeted in the meantime does not merge.
+GitHub's merge API cannot pin the base itself, so a retarget landing in the
+second between that check and the merge is the one case left, as on the
+web. It merges now or not at all: a base that requires a merge queue
+fails instead of queueing or turning on auto-merge.
 
 IPC works from anywhere, always targeting the focused monitor's instance:
 
