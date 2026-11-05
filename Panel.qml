@@ -580,7 +580,26 @@ Panel {
   // Keys and real pointer motion call this before moving the cursor. A
   // cursor change without it (a refresh removed the merged PR, say) keeps
   // the finished action's item and notice on screen.
-  function releaseHold() { holdAfterAction = false }
+  function releaseHold() {
+    if (!holdAfterAction) return
+    holdAfterAction = false
+    // The cursor may not change (pointer motion within the row, Up on the
+    // first row), so bring the pane to it explicitly.
+    Qt.callLater(syncPreviewToCursor)
+  }
+
+  function syncPreviewToCursor() {
+    if (!previewOpen || previewMode !== "" || actionBusy || holdAfterAction) return
+    if (cursorUrl === "") {
+      previewUrl = ""
+      previewData = null
+      previewStub = null
+      previewError = ""
+      previewLoading = false
+    } else if (cursorUrl !== previewUrl) {
+      showPreview(cursorUrl, true)
+    }
+  }
   onPreviewModeChanged: {
     if (previewMode !== "" || !previewOpen || actionBusy) return
     if (holdAfterAction) return
@@ -1205,6 +1224,8 @@ Panel {
 
   function openSearch() {
     if (previewMode === "merge" && !actionBusy) previewMode = ""
+    // Single-column: the search field lives in the list, so show the list.
+    if (paneSolo && !actionBusy) closePreview()
     keysOpen = false
     if (settingsOpen) closeSettings()
     Qt.callLater(function() { if (panelFlick) panelFlick.contentY = 0 })
