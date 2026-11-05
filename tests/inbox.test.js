@@ -174,12 +174,12 @@ t("body blocks: headings, paragraphs, bullets with their depth, numbered items, 
     { heading: false, text: "top", bullet: "•", indent: 0 },
     { heading: false, text: "nested code", bullet: "•", indent: 1 },
     { heading: false, text: "first", bullet: "1.", indent: 0 },
-    { heading: false, text: "a · b", bullet: "", indent: 0 },
+    { heading: true, text: "a · b", bullet: "", indent: 0 },
     { heading: false, text: "1 · 2", bullet: "", indent: 0 }])
 })
 t("markdown noise: images, links, checkboxes, fences, details and quotes read as text", () => {
   const b = I.bodyBlocks("![shot](https://github.com/user-attachments/x.png)\n<img src=\"https://e.x/a.png\" width=\"300\">\nSee [the docs](https://x.y/z)\n```yaml\nkey: 1\n```\n- [ ] todo\n- [x] done\n<details><summary>More</summary>\nhidden\n</details>")
-  eq(b.map(x => x.bullet + "|" + x.text), ["|[image]\n[image]\nSee the docs\nkey: 1", "☐|todo", "☑|done", "|More\nhidden"])
+  eq(b.map(x => x.bullet + "|" + x.text), ["|[image]\n[image]\nSee the docs\nkey: 1", "[ ]|todo", "[x]|done", "|More\nhidden"])
   assert.strictEqual(I.plainText("> quoted reply\nmy answer with [a link](https://x)\n\n\n\nend"), "my answer with a link\n\nend")
 })
 
@@ -261,10 +261,36 @@ t("comments: emoji codes read as emoji, and tags or links cut by the 400-charact
   assert.strictEqual(I.plainText("Comparing base ([2f4d84f](https://app.codecov.io/gh/ut-issl/cosmica/commit…"), "Comparing base (2f4d84f")
 })
 
+t("comments: list markers read as bullets", () => {
+  assert.strictEqual(I.plainText("Checked:\n- one\n  * two\n1. three"), "Checked:\n• one\n  • two\n1. three")
+})
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])
   assert.strictEqual(I.undismissed([{ threadId: "1", updatedAt: "t2" }], { "1": "t1" }).length, 1)
+})
+
+t("body blocks: a GitHub alert reads as a heading inside its quote, warnings urgent", () => {
+  eq(I.bodyBlocks("> [!WARNING]\n> Be careful\n\n> [!NOTE]\n> Fyi"), [
+    { heading: true, text: "Warning", bullet: "", indent: 0, quote: true, urgent: true },
+    { heading: false, text: "Be careful", bullet: "", indent: 0, quote: true },
+    { heading: true, text: "Note", bullet: "", indent: 0, quote: true },
+    { heading: false, text: "Fyi", bullet: "", indent: 0, quote: true }])
+})
+t("reviews: who approved, who asked for changes, and whether my review is asked", () => {
+  eq(I.reviewLine([{ author: "a", state: "APPROVED" }], [], "me", ""), { text: "Approved by @a", tone: "good" })
+  eq(I.reviewLine([{ author: "a", state: "CHANGES_REQUESTED" }, { author: "b", state: "APPROVED" }, { author: "c", state: "COMMENTED" }], ["ME"], "me", "CHANGES_REQUESTED"),
+    { text: "Changes requested by @a · approved by @b · your review is requested", tone: "bad" })
+  eq(I.reviewLine([], ["x", "org/team", "z"], "me", ""), { text: "No reviews yet · waiting on @x, @org/team +1", tone: "dim" })
+  eq(I.reviewLine([], ["me"], "me", "REVIEW_REQUIRED"), { text: "Review required · your review is requested", tone: "ask" })
+  eq(I.reviewLine([{ author: "a", state: "APPROVED" }], [], "me", "REVIEW_REQUIRED"), { text: "Approved by @a · more reviews required", tone: "dim" })
+  eq(I.reviewLine(null, null, "", ""), { text: "No reviews yet", tone: "dim" })
+})
+t("comments: an empty cleaned comment says why, never that it quoted when it did not", () => {
+  assert.strictEqual(I.emptyCommentNote("<!-- walkthrough -->\n<details>", ""), "No text preview. Enter opens it.")
+  assert.strictEqual(I.emptyCommentNote("> earlier words\n> more", ""), "Only quotes an earlier comment")
+  assert.strictEqual(I.emptyCommentNote("", "APPROVED"), "Approved, no comment")
+  assert.strictEqual(I.emptyCommentNote("", "CHANGES_REQUESTED"), "Requested changes, no comment")
 })
 
 console.log("\n" + pass + " passed, " + fail + " failed")

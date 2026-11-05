@@ -697,7 +697,10 @@ Panel {
     var row = rowAt(cursor)
     var it = row && row.item && String(row.item.url) === url ? row.item : null
     if (!it) return null
-    return { kind: /\/pull\//.test(url) ? "pr" : "issue", url: url, title: String(it.title || ""), stub: true }
+    // Empty lists, so a binding read mid-switch between previews finds them.
+    return { kind: /\/pull\//.test(url) ? "pr" : "issue", url: url, title: String(it.title || ""), stub: true,
+      labels: [], comments: [], commentTotal: 0, mergeMethods: [], reviews: [], requested: [],
+      checks: { passed: 0, failed: 0, pending: 0, total: 0, state: "" } }
   }
 
   // Up to five minutes old shows at once. Older than a minute it is
@@ -870,7 +873,7 @@ Panel {
     if (!d || d.kind !== "pr") return "Only pull requests merge"
     if (d.state === "MERGED") return "Already merged"
     if (d.state === "CLOSED") return "Closed"
-    if (d.state === "DRAFT") return "Draft: m marks it ready for review"
+    if (d.state === "DRAFT") return "Draft"
     if (d.canMerge === false) return "You do not have permission to merge here"
     if (d.mergeable === "CONFLICTING") return "Has conflicts with " + d.base
     if (d.mergeable !== "MERGEABLE") return "GitHub is still checking mergeability"
@@ -991,6 +994,9 @@ Panel {
     var kind = actionProcess.kind
     if (!parsed || parsed.ok !== true) {
       notice(parsed && parsed.error ? String(parsed.error) : "GitHub did not answer", true)
+      // A merge or ready that failed or timed out may still have happened:
+      // show what GitHub says now.
+      if (kind !== "comment" && previewUrl === actionProcess.target) reloadPreview()
       // A failed post keeps its draft: give the box the keys back.
       if (previewMode === "comment") Qt.callLater(function() { previewPane.focusComment() })
       return
@@ -1053,7 +1059,7 @@ Panel {
     if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
     if (previewOpen) return "j/k next item · J/K scroll · ↵ open · c comment"
       + (canMarkReady ? " · m ready for review" : (previewData && previewData.kind === "pr" && mergeBlock === "" ? " · m merge" : ""))
-      + (paneSolo ? " · p back to the list" : " · p close")
+      + (paneSolo ? " · p back to the list" : " · p close") + " · ? keys"
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
       if (!srow) return "space toggle · j/k move · s or Esc back"
@@ -1282,15 +1288,6 @@ Panel {
   function scrollPreview(direction) { previewPane.scrollBy(direction) }
 
   // Qt's default turns touchpad input into coarse steps that feel stiff.
-  // Pixel deltas (touchpads) move the content exactly with the fingers;
-  // angle deltas (wheel notches) move three lines each.
-  function wheelScroll(flick, event) {
-    var maxY = Math.max(0, flick.contentHeight - flick.height)
-    var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(54)
-    flick.contentY = clamp(flick.contentY - dy, 0, maxY)
-    event.accepted = true
-  }
-
   // Open from the pane does what opening the row does (a notification is
   // dismissed, a mention marked seen) when the pane shows the cursor's row.
   function openPreviewed() {
@@ -1915,11 +1912,7 @@ Panel {
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-        // A touchpad scrolls 1:1 with the fingers, a wheel notch glides.
-        WheelHandler {
-          acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-          onWheel: function(event) { root.wheelScroll(panelFlick, event) }
-        }
+        SmoothWheel { flick: panelFlick }
 
         Column {
           id: column

@@ -264,9 +264,10 @@ function bodyBlocks(text, maxBlocks) {
   if (!cut) for (var c = 0; c < rawLines.length; c++) if (/<\/blockquote>/i.test(rawLines[c])) lastClose = c
   // Every block made inside a quote is marked, so quoted release notes in
   // a bot's PR never read as the author's words.
-  function block(heading, txt, bullet, indent, quote) {
+  function block(heading, txt, bullet, indent, quote, urgent) {
     var b = { heading: heading, text: txt, bullet: bullet, indent: indent }
     if (quote) b.quote = true
+    if (urgent) b.urgent = true
     blocks.push(b)
   }
   // Hard-wrapped prose (commit-style bodies at about 72 columns) joins up:
@@ -305,9 +306,16 @@ function bodyBlocks(text, maxBlocks) {
     var htmlHeading = /^\s*<h[1-6]\b[^>]*>(.*)<\/h[1-6]>\s*$/i.exec(raw)
     var htmlItem = /^\s*<li\b[^>]*>(.*?)(<\/li>)?\s*$/i.exec(raw)
     // A table row the 1200-character cut ended early has no closing pipe.
-    if (/^\s*\|/.test(raw)) {
+    // The row above the |---| line is the header: bold, as column names.
+    var alert = /^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i.exec(raw)
+    if (alert) {
       flush()
-      block(false, cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · "), "", 0, htmlQuote)
+      var kindName = alert[1].toLowerCase()
+      block(true, kindName.charAt(0).toUpperCase() + kindName.slice(1), "", 0, true, /warning|caution/.test(kindName))
+      paraQuote = true
+    } else if (/^\s*\|/.test(raw)) {
+      flush()
+      block(i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1]), cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · "), "", 0, htmlQuote)
     } else if (/^#{1,6}\s+/.test(raw) || htmlHeading) {
       flush()
       block(true, cleanLine(htmlHeading ? htmlHeading[1] : raw.replace(/^#{1,6}\s+/, "")).trim(), "", 0, htmlQuote)
@@ -319,7 +327,7 @@ function bodyBlocks(text, maxBlocks) {
       } else {
         var indent = Math.min(4, Math.floor(li[1].length / 2))
         var box = /^\[( |x|X)\]\s+(.*)$/.exec(li[3])
-        if (box) block(false, cleanLine(box[2]).trim(), box[1] === " " ? "☐" : "☑", indent, htmlQuote)
+        if (box) block(false, cleanLine(box[2]).trim(), box[1] === " " ? "[ ]" : "[x]", indent, htmlQuote)
         else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent, htmlQuote)
       }
     } else {
@@ -342,8 +350,49 @@ function bodyBlocks(text, maxBlocks) {
 function plainText(text) {
   return String(text || "").slice(0, 2000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "")
     .split("\n").filter(function(l) { return !/^\s*>/.test(l) && !/^\s*```/.test(l) })
-    .map(function(l) { return cleanLine(l.replace(/^#{1,6}\s+/, "")) })
+    .map(function(l) { return cleanLine(l.replace(/^#{1,6}\s+/, "").replace(/^(\s*)[-*+]\s+/, "$1• ")) })
     .join("\n").replace(/\n{3,}/g, "\n\n").trim()
+}
+
+// The review line: who approved, who asked for changes, and who is still
+// asked, with the viewer named as "your review". Reviews that only
+// commented carry no verdict and are left out.
+function reviewLine(reviews, requested, viewer, decision) {
+  function names(list) {
+    return list.slice(0, 2).map(function(n) { return "@" + n }).join(", ") + (list.length > 2 ? " +" + (list.length - 2) : "")
+  }
+  var me = String(viewer || "").toLowerCase()
+  var approved = [], changes = [], waiting = [], youAsked = false
+  var r = reviews || [], q = requested || []
+  for (var i = 0; i < r.length && i < 50; i++) {
+    var who = String(r[i].author || "")
+    if (r[i].state === "APPROVED") approved.push(who)
+    else if (r[i].state === "CHANGES_REQUESTED") changes.push(who)
+  }
+  for (var k = 0; k < q.length && k < 50; k++) {
+    if (me !== "" && String(q[k]).toLowerCase() === me) youAsked = true
+    else waiting.push(String(q[k]))
+  }
+  var parts = []
+  if (changes.length > 0) parts.push("changes requested by " + names(changes))
+  if (approved.length > 0) parts.push("approved by " + names(approved))
+  if (parts.length === 0) parts.push(decision === "REVIEW_REQUIRED" ? "review required" : "no reviews yet")
+  else if (decision === "REVIEW_REQUIRED" && changes.length === 0) parts.push("more reviews required")
+  if (youAsked) parts.push("your review is requested")
+  else if (waiting.length > 0) parts.push("waiting on " + names(waiting))
+  var text = parts.join(" · ")
+  var tone = changes.length > 0 ? "bad" : (youAsked ? "ask"
+    : (approved.length > 0 && decision !== "REVIEW_REQUIRED" ? "good" : "dim"))
+  return { text: text.charAt(0).toUpperCase() + text.slice(1), tone: tone }
+}
+
+// What a comment card says when nothing is left after cleanup.
+function emptyCommentNote(body, state) {
+  if (state === "APPROVED") return "Approved, no comment"
+  if (state === "CHANGES_REQUESTED") return "Requested changes, no comment"
+  var b = String(body || "").slice(0, 2000).replace(/<!--[\s\S]*?-->/g, "").trim()
+  if (b !== "" && b.split("\n").every(function(l) { return l.trim() === "" || /^\s*>/.test(l) })) return "Only quotes an earlier comment"
+  return "No text preview. Enter opens it."
 }
 
 // The checks line. It leads with how many fail or run, and says when more

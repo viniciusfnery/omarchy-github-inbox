@@ -37,6 +37,7 @@ Item {
 
   function scrollBy(direction) {
     scrollGlide.stop()
+    flick.cancelFlick()
     scrollGlide.to = Math.max(0, Math.min(maxScroll, flick.contentY + direction * flick.height * 0.5))
     scrollGlide.start()
   }
@@ -97,6 +98,8 @@ Item {
   readonly property bool bodyCapped: full && Inbox.bodyBlocks(d.body, 13).length > 12
 
   function plainBody(text) { return Inbox.plainText(text) }
+  readonly property var review: full && isPr
+    ? Inbox.reviewLine(d.reviews, d.requested, String(inbox.feed.user || ""), String(d.reviewDecision || "")) : null
 
   Rectangle {
     visible: !pane.solo
@@ -196,18 +199,16 @@ Item {
     anchors.top: header.visible ? header.bottom : parent.top
     anchors.topMargin: header.visible ? Style.space(10) : 0
     anchors.bottom: actions.top
-    anchors.bottomMargin: Style.space(4)
+    // Room for "↓ more", so it never sits on the text.
+    anchors.bottomMargin: pane.full ? moreChip.implicitHeight + Style.space(8) : Style.space(4)
     contentWidth: width
     contentHeight: content.implicitHeight
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     interactive: contentHeight > height
-    WheelHandler {
-      acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-      onWheel: function(event) {
-        scrollGlide.stop()
-        pane.inbox.wheelScroll(flick, event)
-      }
+    SmoothWheel {
+      flick: flick
+      onScrolled: scrollGlide.stop()
     }
     // Always drawn when there is more to read, so the pane says it scrolls.
     ScrollBar.vertical: ScrollBar { policy: pane.maxScroll > 0 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
@@ -255,6 +256,7 @@ Item {
         Text {
           width: parent.width
           text: pane.full ? "@" + pane.d.author + " · opened " + pane.ago(pane.d.createdAt)
+            + (pane.d.updatedAt && pane.ago(pane.d.updatedAt) !== pane.ago(pane.d.createdAt) ? " · updated " + pane.ago(pane.d.updatedAt) : "")
             + (!pane.isPr && pane.d.assignees && pane.d.assignees.length > 0
               ? " · assigned to " + pane.d.assignees.map(function(a) { return "@" + a }).join(", ") : "") : ""
           textFormat: Text.PlainText
@@ -296,16 +298,20 @@ Item {
         }
 
         StatusLine {
-          readonly property string r: pane.isPr ? String(pane.d.reviewDecision || "") : ""
-          glyph: r === "APPROVED" ? "" : (r === "CHANGES_REQUESTED" ? "" : "")
-          tone: r === "CHANGES_REQUESTED" ? pane.inbox.urgent : (r === "APPROVED" ? pane.inbox.foreground : pane.inbox.dim)
-          text: r === "APPROVED" ? "Approved" : (r === "CHANGES_REQUESTED" ? "Changes requested"
-            : (r === "REVIEW_REQUIRED" ? "Review required" : "No required reviews"))
+          readonly property var r: pane.isPr ? pane.review : null
+          glyph: !r ? "" : (r.tone === "good" ? "" : (r.tone === "bad" ? "" : ""))
+          tone: !r ? pane.inbox.dim : (r.tone === "bad" ? pane.inbox.urgent
+            : (r.tone === "dim" ? pane.inbox.dim : pane.inbox.foreground))
+          text: r ? r.text : ""
         }
 
+        // A draft is a step to take, not a failure; GitHub still checking is
+        // a wait; anything else that stops the merge is a problem to fix.
         StatusLine {
-          glyph: pane.inbox.mergeBlock === "" ? "" : ""
-          tone: pane.inbox.mergeBlock === "" ? pane.inbox.foreground : pane.inbox.dim
+          readonly property bool draft: pane.full && pane.d.state === "DRAFT"
+          readonly property bool checking: pane.full && pane.d.mergeable !== "MERGEABLE" && pane.d.mergeable !== "CONFLICTING"
+          glyph: pane.inbox.mergeBlock === "" ? "" : (draft ? "" : (checking ? "" : ""))
+          tone: pane.inbox.mergeBlock === "" || draft ? pane.inbox.foreground : (checking ? pane.inbox.dim : pane.inbox.urgent)
           text: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock
             : (pane.checksFailing ? "Can merge into " + pane.d.base + ", but checks are failing"
               : "Ready to merge into " + pane.d.base)
@@ -378,54 +384,71 @@ Item {
       }
 
       // Markdown headings become bold lines; everything stays PlainText.
-      Repeater {
-        id: bodyRepeater
-        model: pane.full ? pane.bodyBlocks : []
+      // List items sit close together, headings get room above, so the
+      // description groups the way it was written.
+      Column {
+        visible: pane.full && pane.bodyBlocks.length > 0
+        width: parent.width
+        Repeater {
+          id: bodyRepeater
+          model: pane.full ? pane.bodyBlocks : []
 
-        // A list item is its marker and a wrapping column beside it, so its
-        // second line keeps the item's indent.
-        Row {
-          id: blockRow
-          required property var modelData
-          readonly property bool quote: modelData.quote === true
-          width: content.width
-          topPadding: modelData.heading ? Style.space(4) : 0
-          // A quote sits behind a bar, dim, so it never reads as the author's.
-          leftPadding: quote ? Style.space(10) : modelData.indent * Style.space(14)
-          spacing: Style.space(6)
+          // A list item is its marker and a wrapping column beside it, so its
+          // second line keeps the item's indent.
+          Row {
+            id: blockRow
+            required property var modelData
+            required property int index
+            readonly property bool quote: modelData.quote === true
+            readonly property var prev: index > 0 ? pane.bodyBlocks[index - 1] : null
+            width: content.width
+            // Text under a heading belongs to it: close below, room above.
+          topPadding: !prev ? 0 : (modelData.heading ? Style.space(14) : prev.heading ? Style.space(4)
+              : (modelData.bullet !== "" && prev.bullet !== "" ? Style.space(3) : Style.space(8)))
+            // A quote sits behind a bar, dim, so it never reads as the author's.
+            leftPadding: quote ? Style.space(10) : modelData.indent * Style.space(14)
+            spacing: Style.space(6)
 
-          Rectangle {
-            visible: blockRow.quote
-            x: 0
-            width: 2
-            height: quoteText.implicitHeight
-            color: pane.inbox.alpha(pane.inbox.foreground, 0.3)
-          }
+            // One quote reads as one bar: a block continuing a quote draws
+            // its bar up through the gap above it.
+            Item {
+              visible: blockRow.quote
+              width: 2
+              height: quoteText.implicitHeight
 
-          Text {
-            id: bulletText
-            visible: modelData.bullet !== ""
-            // As wide as "00." so item text lines up after "9." and "10.".
-            width: markerMetrics.width
-            horizontalAlignment: Text.AlignRight
-            text: modelData.bullet
-            textFormat: Text.PlainText
-            color: pane.inbox.dim
-            font.family: pane.inbox.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
+              Rectangle {
+                y: blockRow.prev && blockRow.prev.quote ? -blockRow.topPadding : 0
+                width: 2
+                height: parent.height - y
+                color: pane.inbox.alpha(pane.inbox.foreground, 0.3)
+              }
+            }
 
-          Text {
-            id: quoteText
-            width: parent.width - parent.leftPadding - (bulletText.visible ? bulletText.width + parent.spacing : 0)
-              - (blockRow.quote ? 2 + parent.spacing : 0)
-            text: modelData.text
-            textFormat: Text.PlainText
-            color: blockRow.quote ? pane.inbox.dim : pane.inbox.foreground
-            font.family: pane.inbox.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            font.bold: modelData.heading
-            wrapMode: Text.Wrap
+            Text {
+              id: bulletText
+              visible: modelData.bullet !== ""
+              // As wide as "00." so item text lines up after "9." and "10.".
+              width: markerMetrics.width
+              horizontalAlignment: Text.AlignRight
+              text: modelData.bullet
+              textFormat: Text.PlainText
+              color: pane.inbox.dim
+              font.family: pane.inbox.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              id: quoteText
+              width: parent.width - parent.leftPadding - (bulletText.visible ? bulletText.width + parent.spacing : 0)
+                - (blockRow.quote ? 2 + parent.spacing : 0)
+              text: modelData.text
+              textFormat: Text.PlainText
+              color: modelData.urgent ? pane.inbox.urgent : (blockRow.quote ? pane.inbox.dim : pane.inbox.foreground)
+              font.family: pane.inbox.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: modelData.heading
+              wrapMode: Text.Wrap
+            }
           }
         }
       }
@@ -448,8 +471,9 @@ Item {
         visible: pane.full && pane.d.comments.length > 0
         width: parent.width
         topPadding: Style.space(6)
-        text: "LATEST COMMENTS" + (pane.d && pane.d.commentTotal > pane.d.comments.length
-          ? " · " + pane.d.comments.length + " OF " + pane.d.commentTotal : "")
+        text: !pane.full ? "" : (pane.d.commentTotal > pane.d.comments.length
+          ? "LATEST COMMENTS · " + pane.d.comments.length + " OF " + pane.d.commentTotal
+          : "COMMENTS · " + pane.d.comments.length)
         foreground: pane.inbox.foreground
         fontFamily: pane.inbox.fontFamily
       }
@@ -467,8 +491,11 @@ Item {
           width: content.width
           implicitHeight: commentColumn.implicitHeight + Style.space(16)
           radius: Style.cornerRadius
-          color: pane.inbox.alpha(pane.inbox.foreground, bot ? 0.02 : 0.045)
-          borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, 0.1), 1)
+          readonly property string state: String(modelData.state || "")
+          // People's cards are filled like the list's selected row; bots
+          // keep only the edge, so they recede.
+          color: bot ? "transparent" : pane.inbox.alpha(pane.inbox.foreground, 0.07)
+          borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, bot ? 0.14 : 0.2), 1)
 
           Column {
             id: commentColumn
@@ -491,7 +518,7 @@ Item {
                 font.pixelSize: Style.font.caption
                 font.bold: true
                 elide: Text.ElideRight
-                width: Math.min(implicitWidth, parent.width - whenText.implicitWidth - botTag.width - Style.space(12))
+                width: Math.min(implicitWidth, parent.width - whenText.implicitWidth - botTag.width - stateTag.width - Style.space(18))
               }
 
               BorderSurface {
@@ -515,6 +542,29 @@ Item {
                 }
               }
 
+              // A review says its verdict, in the tone the status lines use.
+              BorderSurface {
+                id: stateTag
+                visible: card.state === "APPROVED" || card.state === "CHANGES_REQUESTED" || card.state === "COMMENTED"
+                readonly property color tone: card.state === "CHANGES_REQUESTED" ? pane.inbox.urgent : pane.inbox.foreground
+                width: visible ? stateLabel.implicitWidth + Style.space(8) : 0
+                height: stateLabel.implicitHeight + Style.space(2)
+                anchors.verticalCenter: authorText.verticalCenter
+                radius: Style.cornerRadius
+                color: "transparent"
+                borderSpec: Border.flat(pane.inbox.alpha(tone, 0.4), 1)
+
+                Text {
+                  id: stateLabel
+                  anchors.centerIn: parent
+                  text: card.state === "APPROVED" ? "approved" : (card.state === "CHANGES_REQUESTED" ? "changes requested" : "reviewed")
+                  textFormat: Text.PlainText
+                  color: stateTag.tone
+                  font.family: pane.inbox.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
               Text {
                 id: whenText
                 text: pane.ago(modelData.createdAt)
@@ -528,8 +578,9 @@ Item {
             Text {
               width: parent.width
               readonly property string clean: pane.plainBody(modelData.body)
-              text: clean !== "" ? clean : "Quoted an earlier comment"
+              text: clean !== "" ? clean : Inbox.emptyCommentNote(modelData.body, card.state)
               textFormat: Text.PlainText
+              font.italic: clean === ""
               color: clean !== "" && !card.bot ? pane.inbox.foreground : pane.inbox.dim
               font.family: pane.inbox.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -549,7 +600,7 @@ Item {
     anchors.left: flick.left
     anchors.right: flick.right
     anchors.bottom: flick.bottom
-    height: Style.space(36)
+    height: Style.space(16)
     gradient: Gradient {
       GradientStop { position: 0.0; color: "transparent" }
       GradientStop { position: 1.0; color: Color.popups.background }
@@ -557,10 +608,12 @@ Item {
   }
 
   BorderSurface {
+    id: moreChip
     visible: pane.moreBelow && pane.full
     anchors.right: flick.right
     anchors.rightMargin: Style.space(14)
-    anchors.bottom: flick.bottom
+    anchors.top: flick.bottom
+    anchors.topMargin: Style.space(4)
     implicitWidth: moreText.implicitWidth + Style.space(14)
     implicitHeight: moreText.implicitHeight + Style.space(4)
     radius: Style.cornerRadius
@@ -838,6 +891,19 @@ Item {
           wrapMode: Text.Wrap
         }
 
+        // Someone was asked to review and nobody has approved yet.
+        Text {
+          visible: pane.full && pane.isPr && !!pane.d.requested && pane.d.requested.length > 0
+            && !(pane.d.reviews || []).some(function(r) { return r.state === "APPROVED" })
+          width: parent.width
+          text: "No approvals yet, and reviews are still requested."
+          textFormat: Text.PlainText
+          color: pane.inbox.urgent
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+
         Text {
           visible: pane.checksFailing
           width: parent.width
@@ -850,7 +916,7 @@ Item {
         }
 
         Flow {
-          visible: pane.isPr && pane.d.mergeMethods.length > 1
+          visible: pane.full && pane.isPr && pane.d.mergeMethods.length > 1
           width: parent.width
           spacing: Style.space(6)
 
@@ -935,7 +1001,9 @@ Item {
           && (pane.d.canMerge !== false || pane.inbox.canMarkReady)
         enabled: pane.full
         // On a draft this slot is the step that comes first: ready for review.
-        text: pane.full && pane.d.state === "DRAFT" ? "Ready for review" : "Merge"
+        text: pane.full && pane.d.state === "DRAFT" ? "Ready for review"
+          : (pane.full && pane.d.mergeMethods && pane.d.mergeMethods.length > 0
+            ? ({ squash: "Squash and merge", merge: "Merge", rebase: "Rebase and merge" })[pane.d.mergeMethods[0]] : "Merge")
         tooltipText: pane.full && pane.d.state === "DRAFT" ? "m" : (pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m")
         bordered: true
         foreground: pane.inbox.mergeBlock === "" || pane.inbox.canMarkReady ? pane.inbox.foreground : pane.inbox.dim

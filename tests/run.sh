@@ -249,8 +249,15 @@ pr_fixture() { # [body padding bytes]
         {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
         {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
         {__typename: "StatusContext", state: "SUCCESS"}]}}}}]},
+      updatedAt: "2026-01-04T00:00:00Z",
+      latestOpinionatedReviews: {nodes: [{author: {login: "carol"}, state: "APPROVED"}, {author: {login: "dan"}, state: "COMMENTED"}]},
+      reviewRequests: {nodes: [{requestedReviewer: {__typename: "User", login: "erin"}},
+        {requestedReviewer: {__typename: "Team", combinedSlug: "acme/core"}}]},
+      reviews: {totalCount: 2, nodes: [
+        {author: {login: "carol", __typename: "User"}, createdAt: "2026-01-01T12:00:00Z", state: "APPROVED", body: "LGTM"},
+        {author: {login: "dan", __typename: "User"}, createdAt: "2026-01-01T13:00:00Z", state: "COMMENTED", body: ""}]},
       comments: {totalCount: 40, nodes: [range(3; 6) | {author: {login: ("u" + tostring), __typename: (if . == 4 then "Bot" else "User" end)}, createdAt: "2026-01-02T00:00:00Z",
-        body: ("comment " + tostring + " " + $long)}]}}}}}' >"$FAKE_GH_FIXTURES/graphql.json"
+        body: (if . == 5 then "<!-- " + $long + " -->after the hidden part" else "comment " + tostring + " " + $long end)}]}}}}}' >"$FAKE_GH_FIXTURES/graphql.json"
 }
 
 fresh_env
@@ -267,7 +274,16 @@ t "preview: one GraphQL call, owner and repo as strings" \
 t "preview: someone with write access can merge" "$(jqt '.canMerge == true' "$out")"
 t "preview: comment authors carry whether they are bots" \
   "$(jqt '[.comments[].bot] == [false, true, false]' "$out")"
-t "preview: the comment total comes with the last three" "$(jqt '.commentTotal == 40' "$out")"
+t "preview: the comment total counts reviews with something to show" "$(jqt '.commentTotal == 41' "$out")"
+t "preview: an HTML comment is dropped before the cut, so the text after it shows" \
+  "$(jqt '.comments[2].body == "after the hidden part"' "$out")"
+t "preview: who reviewed, who is asked, and when it was updated" \
+  "$(jqt '.reviews == [{author: "carol", state: "APPROVED"}, {author: "dan", state: "COMMENTED"}] and .requested == ["erin", "acme/core"] and .updatedAt == "2026-01-04T00:00:00Z"' "$out")"
+jq '.data.repository.item.reviews.nodes[0].createdAt = "2026-01-05T00:00:00Z"' "$FAKE_GH_FIXTURES/graphql.json" >"$FAKE_GH_FIXTURES/g2" &&
+  mv "$FAKE_GH_FIXTURES/g2" "$FAKE_GH_FIXTURES/graphql.json"
+out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+t "preview: a newer review joins the comments in time order, with its state, and an empty one does not" \
+  "$(jqt '[.comments[] | .author + ":" + .state] == ["u4:", "u5:", "carol:APPROVED"] and .comments[2].body == "LGTM"' "$out")"
 
 # A closed issue says how it closed: completed and not planned read differently.
 fresh_env
@@ -393,6 +409,21 @@ t "preview: ready marks a draft PR ready for review, never an issue" \
   "$([[ $verdicts == "true true" ]] && echo true || echo false)"
 t "preview: ready goes through gh pr ready" \
   "$([[ $(grep -c '^pr ready https://github.com/acme/repo1/pull/7$' "$FAKE_GH_LOG") -eq 1 ]] && echo true || echo false)"
+
+# A call that hangs is stopped and said so, for every action, so the pane
+# never waits forever on "Merging…".
+fresh_env
+export FAKE_GH_HANG=1
+o1=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main)
+o2=$(bash "$PREVIEW" ready "https://github.com/acme/repo1/pull/7")
+o3=$(printf 'hi' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
+o4=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+unset FAKE_GH_HANG
+hung=true
+for o in "$o1" "$o2" "$o3" "$o4"; do [[ $(jq -r '.error' <<<"$o") == *"No answer from GitHub"* ]] || hung=false; done
+t "preview: a hung gh call ends with a timeout message, for view, merge, ready and comment" "$hung"
+t "preview: every gh call runs under a timeout" \
+  "$(grep -q '^gh() { timeout 30 gh' "$PREVIEW" && echo true || echo false)"
 
 # A base that requires a merge queue must fail, never queue or turn on
 # auto-merge behind a "Merged".

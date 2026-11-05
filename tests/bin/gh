@@ -6,6 +6,8 @@
 #                           exactly like the real gh does on HTTP errors
 #   FAKE_GH_PATCH_FAIL   -> see the --mark-read branch below
 [[ -n ${FAKE_GH_LOG:-} ]] && printf '%s\n' "$*" >>"$FAKE_GH_LOG"
+# FAKE_GH_HANG=1 -> exit as timeout(1) does when it stops a hung call
+[[ ${FAKE_GH_HANG:-0} == 1 ]] && exit 124
 
 if [[ ${1:-} == auth ]]; then
   exit "${FAKE_GH_AUTH_FAIL:-0}"
