@@ -839,6 +839,7 @@ Panel {
     if (d.state === "MERGED") return "Already merged"
     if (d.state === "CLOSED") return "Closed"
     if (d.state === "DRAFT") return "Draft: mark it ready for review first"
+    if (d.canMerge === false) return "You do not have permission to merge here"
     if (d.mergeable === "CONFLICTING") return "Has conflicts with " + d.base
     if (d.mergeable !== "MERGEABLE") return "GitHub is still checking mergeability"
     if (d.mergeState === "BLOCKED") return "Blocked by required reviews or checks"

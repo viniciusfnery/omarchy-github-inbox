@@ -30,7 +30,7 @@ view)
   # repo's merge settings, and only the last three comments.
   if [[ $kind == pr ]]; then
     q='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) {
-      squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+      squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed viewerPermission
       item: pullRequest(number: $number) {
         number title state isDraft url createdAt body additions deletions changedFiles
         baseRefName headRefName headRefOid reviewDecision mergeable mergeStateStatus
@@ -91,6 +91,8 @@ view)
           else .failed += 1 end)
         # Only 100 contexts are counted; the overall state covers them all.
         + {total: (($roll.contexts.totalCount) // 0), state: (($roll.state) // "")})),
+      # Read and triage access cannot merge; say so before the confirmation.
+      canMerge: ($r.viewerPermission | IN("ADMIN", "MAINTAIN", "WRITE")),
       mergeMethods: [
         (if $r.squashMergeAllowed == true then "squash" else empty end),
         (if $r.mergeCommitAllowed == true then "merge" else empty end),

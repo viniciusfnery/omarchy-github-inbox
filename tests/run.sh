@@ -237,6 +237,7 @@ pr_fixture() { # [body padding bytes]
   pad=$(head -c "${1:-0}" /dev/zero | tr '\0' p)
   jq -n --arg long "$long" --rawfile pad <(printf '%s' "$pad") '{data: {repository: {
     squashMergeAllowed: true, mergeCommitAllowed: false, rebaseMergeAllowed: true,
+    viewerPermission: ($ENV.FAKE_PERMISSION // "WRITE"),
     item: {number: 7, title: "Fix it", state: "OPEN", isDraft: false,
       author: {login: "alice"}, createdAt: "2026-01-01T00:00:00Z", body: ("intro\n" + $long + $pad),
       labels: {nodes: [{name: "bug"}]}, reviewDecision: "APPROVED", mergeable: "MERGEABLE",
@@ -263,6 +264,19 @@ t "preview: body and comments are cut to size, the last 3 comments in order" \
   "$(jqt '(.body | length) <= 1201 and (.comments | length) == 3 and .comments[0].author == "u3" and ([.comments[].body | length] | max) <= 401' "$out")"
 t "preview: one GraphQL call, owner and repo as strings" \
   "$([[ $(grep -c '^api graphql' "$FAKE_GH_LOG") -eq 1 ]] && grep -q -- '-f owner=acme -f repo=repo1 -F number=7' "$FAKE_GH_LOG" && echo true || echo false)"
+t "preview: someone with write access can merge" "$(jqt '.canMerge == true' "$out")"
+
+fresh_env
+FAKE_PERMISSION=READ pr_fixture
+out_read=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+FAKE_PERMISSION=TRIAGE pr_fixture
+out_triage=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+t "preview: read or triage access cannot merge" \
+  "$([[ $(jq -r .canMerge <<<"$out_read") == false && $(jq -r .canMerge <<<"$out_triage") == false ]] && echo true || echo false)"
+
+fresh_env
+pr_fixture
+out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
 t "preview: merge methods follow the repo settings, squash first" \
   "$(jqt '.mergeMethods == ["squash", "rebase"]' "$out")"
 

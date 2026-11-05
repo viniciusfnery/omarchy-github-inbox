@@ -312,8 +312,12 @@ Item {
             if (c.pending > 0) parts.push(c.pending + " running")
             if (c.passed > 0) parts.push(c.passed + " passed")
             var counted = c.passed + c.failed + c.pending
-            if (parts.length === 0) parts.push(bad ? "failing" : "unknown")
-            return "Checks: " + parts.join(", ") + (c.total > counted ? " (first " + counted + " of " + c.total + ")" : "")
+            // Lead with the overall result: with more checks than counted,
+            // the counts alone can read like a pass.
+            var lead = bad ? "Checks failing" : (waiting ? "Checks running" : "Checks passed")
+            if (c.total <= counted && !bad && !waiting) return "Checks: " + parts.join(", ")
+            return lead + (parts.length > 0 ? " · " + parts.join(", ") : "")
+              + (c.total > counted ? " (first " + counted + " of " + c.total + ")" : "")
           }
         }
 
