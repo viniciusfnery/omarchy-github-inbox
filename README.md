@@ -4,7 +4,7 @@ Your GitHub inbox in the [Omarchy](https://omarchy.org) bar: one chip with
 your open workload count, one panel with everything on your plate. Every row
 is one click (or one keystroke) away from its page on GitHub.
 
-<img src="screenshot.png" width="415" alt="GitHub Inbox panel under the Omarchy bar, showing the org filter, fuzzy find, and the six sections">
+<img src="screenshot.png" width="380" alt="GitHub Inbox panel showing the six sections, with the selected notification's dismiss button and the key hints"> <img src="screenshot-settings.png" width="380" alt="GitHub Inbox settings: desktop notifications and focus mode switches, and an org tree with show/hide checkboxes and focus targets">
 
 ## Sections
 
