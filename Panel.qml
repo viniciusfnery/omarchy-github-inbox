@@ -546,7 +546,10 @@ Panel {
     var w = panel.screenW
     paneOnLeft = w <= 0 || panel.anchorScreenPos.x + panel.anchorW / 2 > w / 2
   }
-  property int commentSerial: 0
+  signal commentPosted(string url)
+  // A reload that must start fresh: an answer already in flight began
+  // before the action and is discarded, so wait for it and ask again.
+  property bool reloadPending: false
 
   function focusList() { keyCatcher.forceActiveFocus() }
 
@@ -563,18 +566,22 @@ Panel {
   onPreviewModeChanged: if (previewMode === "" && previewOpen && !actionBusy && cursorUrl !== "" && cursorUrl !== previewUrl) previewDebounce.restart()
 
   function togglePreview() {
+    if (actionBusy) return
     if (previewOpen) closePreview()
     else openPreview()
   }
 
+  // While a comment or merge runs nothing replaces or closes the pane, by
+  // key or by mouse, so its result always lands on its own item.
   function openPreview() {
-    if (cursorUrl === "") return
+    if (cursorUrl === "" || actionBusy) return
     if (!previewOpen) pickPaneSide()
     previewOpen = true
     showPreview(cursorUrl)
   }
 
   function closePreview() {
+    if (actionBusy) return
     previewOpen = false
     previewMode = ""
     keyCatcher.forceActiveFocus()
@@ -637,6 +644,7 @@ Panel {
   }
 
   function showPreview(url) {
+    if (actionBusy) return
     if (url !== previewUrl) unknownRetries = 0
     previewStale = false
     previewUrl = url
@@ -683,7 +691,8 @@ Panel {
     lastPrefetchAt = Date.now()
     var url = prefetchQueue[0]
     prefetchQueue = prefetchQueue.slice(1)
-    if (cachedPreview(url, 60000)) { Qt.callLater(runPrefetch); return }
+    var failedRecently = Inbox.has(failedAt, url) && Date.now() - failedAt[url] < 60000
+    if (cachedPreview(url, 60000) || failedRecently) { Qt.callLater(runPrefetch); return }
     prefetchProcess.requested = url
     prefetchProcess.startedAt = Date.now()
     prefetchProcess.command = ["bash", previewPath, "view", url]
@@ -704,7 +713,10 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.applyPreview(text, prefetchProcess.requested, prefetchProcess.startedAt)
     }
-    onRunningChanged: if (!running) Qt.callLater(root.runPrefetch)
+    onRunningChanged: if (!running) {
+      if (root.reloadPending) Qt.callLater(root.loadPreview)
+      Qt.callLater(root.runPrefetch)
+    }
   }
 
   // One visible fetch at a time, beside at most one background fetch. A
@@ -713,8 +725,10 @@ Panel {
   // already running for this URL is simply awaited.
   function loadPreview() {
     if (previewUrl === "") return
-    if (prefetchProcess.running && prefetchProcess.requested === previewUrl) return
+    if (!reloadPending && prefetchProcess.running && prefetchProcess.requested === previewUrl) return
     if (previewProcess.running) return
+    if (reloadPending && prefetchProcess.running && prefetchProcess.requested === previewUrl) return
+    reloadPending = false
     previewProcess.requested = previewUrl
     previewProcess.startedAt = Date.now()
     previewProcess.command = ["bash", previewPath, "view", previewUrl]
@@ -763,7 +777,7 @@ Panel {
       onStreamFinished: root.applyPreview(text, previewProcess.requested, previewProcess.startedAt)
     }
     onRunningChanged: if (!running) {
-      if (root.previewLoading && root.previewUrl !== requested) Qt.callLater(root.loadPreview)
+      if (root.reloadPending || (root.previewLoading && root.previewUrl !== requested)) Qt.callLater(root.loadPreview)
       Qt.callLater(root.runPrefetch)
     }
   }
@@ -840,12 +854,17 @@ Panel {
       notice("New commits arrived since you opened this. Review them, then press m again.", true)
       return
     }
+    if (previewData && String(previewData.base) !== mergeTarget.base) {
+      previewMode = ""
+      notice("This PR now targets " + previewData.base + ". Review it, then press m again.", true)
+      return
+    }
     actionBusy = true
     actionProcess.kind = "merge"
     actionProcess.target = mergeTarget.url
     actionProcess.payload = ""
     actionProcess.stdinEnabled = false
-    actionProcess.command = ["bash", previewPath, "merge", mergeTarget.url, mergeMethod, mergeTarget.sha]
+    actionProcess.command = ["bash", previewPath, "merge", mergeTarget.url, mergeMethod, mergeTarget.sha, mergeTarget.base]
     actionProcess.running = true
   }
 
@@ -860,9 +879,9 @@ Panel {
       notice(parsed && parsed.error ? String(parsed.error) : "GitHub did not answer", true)
       return
     }
-    if (kind === "comment") commentSerial++
+    if (kind === "comment") commentPosted(actionProcess.target)
     previewMode = ""
-    notice(kind === "merge" ? "Merged" : "Comment posted", false)
+    if (previewUrl === actionProcess.target) notice(kind === "merge" ? "Merged" : "Comment posted", false)
     // Show what GitHub now says, and let the list catch up with a merge.
     // Any answer to a request started before now is out of date.
     var stale = Inbox.copy(invalidatedAt)
@@ -873,6 +892,7 @@ Panel {
     previewCache = next
     if (previewUrl === actionProcess.target) {
       previewLoading = true
+      reloadPending = true
       loadPreview()
     }
     if (kind === "merge") refreshNow()
@@ -1525,8 +1545,10 @@ Panel {
       }
       onActivateRequested: {
         if (root.keysOpen) return
-        if (root.previewOpen && root.previewMode === "merge") root.confirmMerge()
-        else if (root.settingsOpen) root.activateSettings()
+        // Space or a repeated Enter must not merge: the strip ignores this
+        // generic signal, and a fresh Enter reaches it through the Shortcut.
+        if (root.previewOpen && root.previewMode === "merge") return
+        if (root.settingsOpen) root.activateSettings()
         else if (root.previewOpen && root.previewUrl !== "") root.openPreviewed()
         else root.activateCursor()
       }
@@ -1578,6 +1600,13 @@ Panel {
       // Scrolling the preview. The key catcher sees Shift+j as a plain "j"
       // (it would move the cursor), so these are shortcuts, which Qt handles
       // before the key reaches it. Off while a comment is being typed.
+      // The only key that confirms a merge: a fresh Enter, never a repeat.
+      Shortcut {
+        sequences: ["Return", "Enter"]
+        autoRepeat: false
+        enabled: root.previewOpen && root.previewMode === "merge"
+        onActivated: root.confirmMerge()
+      }
       Shortcut {
         sequences: ["Shift+J", StandardKey.MoveToNextPage]
         enabled: root.previewOpen && !root.commentFocused

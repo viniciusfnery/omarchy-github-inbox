@@ -3,7 +3,7 @@
 # take on them:
 #   preview.sh view <url>
 #   preview.sh comment <url>                       (comment text on stdin)
-#   preview.sh merge <pr url> <squash|merge|rebase> <head sha>
+#   preview.sh merge <pr url> <squash|merge|rebase> <head sha> <base branch>
 # Output is one JSON object, {error: "..."} on failure. Every entry point
 # checks the URL first, so only a github.com PR or issue ever reaches gh,
 # never another host or something gh would read as a flag.
@@ -35,7 +35,7 @@ view)
         baseRefName headRefName headRefOid reviewDecision mergeable mergeStateStatus
         author { login } labels(first: 10) { nodes { name } }
         comments(last: 3) { nodes { author { login } createdAt body } }
-        commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) {
+        commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { totalCount
           nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }'
   else
     q='query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) {
@@ -69,13 +69,15 @@ view)
       mergeState: ($p.mergeStateStatus // ""),
       additions: $p.additions, deletions: $p.deletions, changedFiles: $p.changedFiles,
       base: ($p.baseRefName // ""), head: ($p.headRefName // ""), headSha: ($p.headRefOid // ""),
-      checks: (reduce (($p.commits.nodes[0].commit.statusCheckRollup.contexts.nodes) // [])[] as $c
+      checks: (($p.commits.nodes[0].commit.statusCheckRollup) as $roll | (reduce (($roll.contexts.nodes) // [])[] as $c
         ({passed: 0, failed: 0, pending: 0};
         (($c.conclusion // $c.state) // "") as $res
         | if ($c.__typename == "CheckRun" and ($c.status // "") != "COMPLETED") or ($res | IN("PENDING", "EXPECTED", ""))
           then .pending += 1
           elif ($res | IN("SUCCESS", "NEUTRAL", "SKIPPED")) then .passed += 1
-          else .failed += 1 end)),
+          else .failed += 1 end)
+        # Only 100 contexts are counted; the overall state covers them all.
+        + {total: (($roll.contexts.totalCount) // 0), state: (($roll.state) // "")})),
       mergeMethods: [
         (if $r.squashMergeAllowed == true then "squash" else empty end),
         (if $r.mergeCommitAllowed == true then "merge" else empty end),
@@ -85,15 +87,17 @@ view)
     } end' <<<"$json" || fail "Failed to read GitHub data"
   ;;
 comment)
-  # The limit is in bytes, like the read: counting characters would let a
-  # long non-ASCII comment through cut short.
-  # The x keeps $(...) from dropping trailing newlines, so the byte count
-  # is of exactly what was read, and what is posted is exactly what was typed.
-  body=$(head -c 65537; printf x)
-  body=${body%x}
-  [[ -n ${body//[[:space:]]/} ]] || fail "Empty comment"
-  (( $(printf '%s' "$body" | wc -c) <= 65536 )) || fail "Comment too long"
-  err=$(printf '%s' "$body" | gh "$kind" comment "$url" --body-file - 2>&1 >/dev/null) ||
+  # Read into a private temp file and post that file: the byte count and the
+  # NUL check see exactly what is posted ($(...) drops NULs and trailing
+  # newlines, which once let a long comment through cut short).
+  tmp=$(mktemp) || fail "No temporary file"
+  trap 'rm -f "$tmp"' EXIT
+  head -c 65537 >"$tmp"
+  size=$(wc -c <"$tmp")
+  (( size <= 65536 )) || fail "Comment too long"
+  (( $(tr -d '\000' <"$tmp" | wc -c) == size )) || fail "Comment contains a NUL byte"
+  [[ -n $(tr -d '[:space:]' <"$tmp" | head -c 1) ]] || fail "Empty comment"
+  err=$(gh "$kind" comment "$url" --body-file "$tmp" 2>&1 >/dev/null) ||
     fail "GitHub refused the comment: ${err%%$'\n'*}"
   echo '{"ok": true}'
   ;;
@@ -101,9 +105,18 @@ merge)
   [[ $kind == pr ]] || fail "Only pull requests merge"
   method=${3:-}
   sha=${4:-}
+  base=${5:-}
   [[ $method =~ ^(squash|merge|rebase)$ ]] || fail "Unknown merge method"
   # The head the user looked at: a PR pushed to since then does not merge.
   [[ $sha =~ ^[0-9a-f]{6,40}$ ]] || fail "Missing head commit"
+  [[ $base =~ ^[A-Za-z0-9._/-]+$ ]] || fail "Missing base branch"
+  # --match-head-commit pins the head but not the base: check both now, so
+  # a PR retargeted since the confirmation opened does not merge.
+  now=$(gh pr view "$url" --json baseRefName,headRefOid,state 2>/dev/null) || fail "GitHub did not return this pr"
+  now_base=$(jq -r '.baseRefName // ""' <<<"$now" 2>/dev/null)
+  [[ $now_base == "$base" ]] || fail "This PR now targets ${now_base:-another branch}, not $base. Review it again."
+  [[ $(jq -r '.headRefOid // ""' <<<"$now" 2>/dev/null) == "$sha" ]] || fail "New commits arrived. Review them, then merge again."
+  [[ $(jq -r '.state // ""' <<<"$now" 2>/dev/null) == OPEN ]] || fail "This PR is no longer open"
   err=$(gh pr merge "$url" "--$method" --match-head-commit "$sha" 2>&1 >/dev/null) ||
     fail "GitHub refused the merge: ${err%%$'\n'*}"
   echo '{"ok": true}'

@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import qs.Commons
 import qs.Ui
+import "Inbox.js" as Inbox
 
 // The pane beside the list that previews one PR or issue. Panel.qml owns the
 // state and the gh calls (previewData, previewMode, actions); this file only
@@ -14,6 +15,8 @@ Item {
   property bool onLeft: false
   // Alone in the panel on a narrow screen: no divider.
   property bool solo: false
+  property var drafts: Inbox.dict()
+  property string draftUrl: ""
   // Full data once gh answers. Before that, the row's own title and number,
   // so the pane is never empty while it loads.
   readonly property bool full: inbox.previewData !== null
@@ -89,7 +92,16 @@ Item {
       else para.push(line)
     }
     flush()
-    return blocks.slice(0, 12)
+    return blocks
+  }
+
+  // True when the 12-block cap left something out.
+  readonly property bool bodyCapped: {
+    if (!full) return false
+    var rest = String(d.body || "").split("\n")
+    var count = 0
+    for (var i = 0; i < rest.length; i++) if (rest[i].trim() !== "") count++
+    return bodyBlocks.length >= 12 && count > 12
   }
 
   function plainBody(text) {
@@ -148,11 +160,26 @@ Item {
       Item {
         visible: pane.d !== null
         width: parent.width
-        implicitHeight: Math.max(headerText.implicitHeight, statePill.implicitHeight)
+        implicitHeight: Math.max(headerText.implicitHeight, statePill.implicitHeight, backButton.visible ? backButton.implicitHeight : 0)
+
+        PanelActionButton {
+          id: backButton
+          visible: pane.solo
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: ""
+          tooltipText: "Back to the list (p)"
+          enabled: !pane.inbox.actionBusy
+          foreground: pane.inbox.dim
+          hoverColor: pane.inbox.foreground
+          fontFamily: pane.inbox.fontFamily
+          onClicked: pane.inbox.closePreview()
+        }
 
         Text {
           id: headerText
-          anchors.left: parent.left
+          anchors.left: backButton.visible ? backButton.right : parent.left
+          anchors.leftMargin: backButton.visible ? Style.space(6) : 0
           anchors.right: statePill.visible ? statePill.left : parent.right
           anchors.rightMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
@@ -242,15 +269,22 @@ Item {
 
         StatusLine {
           readonly property var c: pane.isPr ? pane.d.checks : null
-          glyph: !c || c.passed + c.failed + c.pending === 0 ? "" : (c.failed > 0 ? "" : (c.pending > 0 ? "" : ""))
-          tone: c && c.failed > 0 ? pane.inbox.urgent : (c && c.pending > 0 ? pane.inbox.dim : pane.inbox.foreground)
+          // GitHub's overall state covers every check, including any past
+          // the 100 that are counted.
+          readonly property string st: c ? String(c.state || "") : ""
+          readonly property bool bad: st === "FAILURE" || st === "ERROR" || (c && c.failed > 0)
+          readonly property bool waiting: !bad && (st === "PENDING" || st === "EXPECTED" || (c && c.pending > 0))
+          glyph: !c || (c.total || 0) === 0 ? "" : (bad ? "" : (waiting ? "" : ""))
+          tone: bad ? pane.inbox.urgent : (waiting ? pane.inbox.dim : pane.inbox.foreground)
           text: {
-            if (!c || c.passed + c.failed + c.pending === 0) return "No checks"
+            if (!c || (c.total || 0) === 0) return "No checks"
             var parts = []
             if (c.failed > 0) parts.push(c.failed + " failing")
             if (c.pending > 0) parts.push(c.pending + " running")
             if (c.passed > 0) parts.push(c.passed + " passed")
-            return "Checks: " + parts.join(", ")
+            var counted = c.passed + c.failed + c.pending
+            if (parts.length === 0) parts.push(bad ? "failing" : "unknown")
+            return "Checks: " + parts.join(", ") + (c.total > counted ? " (first " + counted + " of " + c.total + ")" : "")
           }
         }
 
@@ -280,7 +314,7 @@ Item {
 
           BorderSurface {
             required property var modelData
-            implicitWidth: labelText.implicitWidth + Style.space(12)
+            implicitWidth: Math.min(labelText.implicitWidth + Style.space(12), content.width)
             implicitHeight: labelText.implicitHeight + Style.space(4)
             radius: Style.cornerRadius
             color: "transparent"
@@ -289,6 +323,8 @@ Item {
             Text {
               id: labelText
               anchors.centerIn: parent
+              width: Math.min(implicitWidth, content.width - Style.space(12))
+              elide: Text.ElideRight
               text: String(modelData)
               textFormat: Text.PlainText
               color: pane.inbox.dim
@@ -348,14 +384,12 @@ Item {
           font.pixelSize: Style.font.bodySmall
           font.bold: modelData.heading
           wrapMode: Text.Wrap
-          maximumLineCount: modelData.heading ? 2 : 8
-          elide: Text.ElideRight
         }
       }
 
       // The description is cut at 1200 characters: say so, and where the rest is.
       Text {
-        visible: pane.full && String(pane.d.body || "").slice(-1) === "…"
+        visible: pane.full && (String(pane.d.body || "").slice(-1) === "…" || pane.bodyCapped)
         width: parent.width
         text: "Only the start is shown. Enter opens the full description."
         textFormat: Text.PlainText
@@ -470,12 +504,14 @@ Item {
     }
 
     // Old data on screen after a failed refresh, or no data at all.
-    Row {
+    Flow {
       visible: pane.inbox.previewStale || (!pane.full && pane.inbox.previewError !== "")
+      width: parent.width
       spacing: Style.space(8)
 
       Text {
-        anchors.verticalCenter: parent.verticalCenter
+        width: Math.min(implicitWidth, parent.width)
+        wrapMode: Text.WordWrap
         text: pane.inbox.previewStale ? "Could not refresh, this may be out of date" : "Could not load this preview"
         textFormat: Text.PlainText
         color: pane.inbox.urgent
@@ -484,7 +520,6 @@ Item {
       }
 
       Button {
-        anchors.verticalCenter: parent.verticalCenter
         text: "Retry"
         tooltipText: "r"
         bordered: true
@@ -610,8 +645,9 @@ Item {
           wrapMode: Text.WordWrap
         }
 
-        Row {
+        Flow {
           visible: pane.isPr && pane.d.mergeMethods.length > 1
+          width: parent.width
           spacing: Style.space(6)
 
           Repeater {
@@ -621,6 +657,7 @@ Item {
               required property var modelData
               text: ({ squash: "Squash", merge: "Merge commit", rebase: "Rebase" })[modelData]
               selected: pane.inbox.mergeMethod === modelData
+              enabled: !pane.inbox.actionBusy
               bordered: true
               foreground: pane.inbox.foreground
               fontFamily: pane.inbox.fontFamily
@@ -630,7 +667,8 @@ Item {
           }
         }
 
-        Row {
+        Flow {
+          width: parent.width
           spacing: Style.space(8)
 
           Button {
@@ -708,8 +746,22 @@ Item {
       if (pane.inbox.previewMode === "comment") Qt.callLater(function() { commentBox.forceActiveFocus() })
       else if (commentBox.activeFocus) pane.inbox.focusList()
     }
-    function onCommentSerialChanged() { commentBox.text = "" }
-    function onPreviewUrlChanged() { commentBox.text = "" }
+    // Drafts are kept per item: cancelling or moving on never loses one,
+    // and only the item a comment was posted to loses its draft.
+    function onCommentPosted(url) {
+      var next = Inbox.copy(pane.drafts)
+      delete next[url]
+      pane.drafts = next
+      if (pane.draftUrl === url) commentBox.text = ""
+    }
+    function onPreviewUrlChanged() {
+      var next = Inbox.copy(pane.drafts)
+      if (pane.draftUrl !== "" && commentBox.text !== "") next[pane.draftUrl] = commentBox.text
+      else delete next[pane.draftUrl]
+      pane.drafts = next
+      pane.draftUrl = pane.inbox.previewUrl
+      commentBox.text = Inbox.has(next, pane.draftUrl) ? next[pane.draftUrl] : ""
+    }
   }
 
   // One status line: glyph and text in a tone.

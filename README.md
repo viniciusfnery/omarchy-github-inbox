@@ -40,7 +40,7 @@ switches to the urgent color while unread notifications or mentions wait.
 | `u` | Undo the last dismissal, from any monitor, within 5 seconds (GitHub is told only after that) |
 | `p` | Preview the selected PR or issue beside the list (it follows `j`/`k`) |
 | `c` / `m` | In a preview: comment, merge (each asks for a second, explicit step) |
-| `J` / `K` | Scroll the preview |
+| `J` / `K` | Scroll the preview (also PageDown/PageUp, Ctrl+d/Ctrl+u) |
 | `f` | Toggle focus mode |
 | `s` | Open or close settings |
 | `/` | Fuzzy find (neovim-style subsequence match on titles, repos, and section names, scoped to the active org filter); `Enter` accepts the filter and returns to navigation, `Esc` clears |
@@ -57,9 +57,10 @@ minute.
 
 From the preview, `Enter` opens the page, `c` opens a comment box that posts
 with `Ctrl+Enter`, and `m` opens a merge confirmation that merges only on a
-second `m` or `Enter`. Merge is offered only when GitHub reports the PR
+fresh `Enter` or its Confirm button (never a held key or Space). Merge is offered only when GitHub reports the PR
 mergeable, uses a method the repo allows, and is pinned to the head commit
-the preview showed, so a PR pushed to in the meantime does not merge.
+the preview showed, and the base branch is checked again right before
+merging, so a PR pushed to or retargeted in the meantime does not merge.
 
 IPC works from anywhere, always targeting the focused monitor's instance:
 

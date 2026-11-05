@@ -243,7 +243,7 @@ pr_fixture() { # [body padding bytes]
       mergeStateStatus: "CLEAN", additions: 10, deletions: 2, changedFiles: 3,
       baseRefName: "main", headRefName: "fix", headRefOid: "abc123",
       url: "https://github.com/acme/repo1/pull/7",
-      commits: {nodes: [{commit: {statusCheckRollup: {contexts: {nodes: [
+      commits: {nodes: [{commit: {statusCheckRollup: {state: "FAILURE", contexts: {totalCount: 140, nodes: [
         {__typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS"},
         {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
         {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
@@ -257,8 +257,8 @@ pr_fixture
 out=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
 t "preview: a PR comes back normalized" \
   "$(jqt '.kind == "pr" and .number == 7 and .author == "alice" and .labels == ["bug"] and .headSha == "abc123" and .mergeable == "MERGEABLE"' "$out")"
-t "preview: checks are counted, not listed" \
-  "$(jqt '.checks == {passed: 2, failed: 1, pending: 1}' "$out")"
+t "preview: checks are counted, with the overall state and the total" \
+  "$(jqt '.checks == {passed: 2, failed: 1, pending: 1, total: 140, state: "FAILURE"}' "$out")"
 t "preview: body and comments are cut to size, the last 3 comments in order" \
   "$(jqt '(.body | length) <= 1201 and (.comments | length) == 3 and .comments[0].author == "u3" and ([.comments[].body | length] | max) <= 401' "$out")"
 t "preview: one GraphQL call, owner and repo as strings" \
@@ -284,8 +284,8 @@ unset FAKE_GH_PREVIEW_FAIL
 fresh_env
 # The comment travels on stdin, never argv, which any local user can read.
 printf '%s' 'Looks good; $(id) stays text' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issues/3" >/dev/null
-t "preview: comment goes to the issue on stdin, byte for byte" \
-  "$(grep -qxF 'issue comment https://github.com/acme/repo1/issues/3 --body-file -' "$FAKE_GH_LOG" && grep -qxF 'stdin: Looks good; $(id) stays text' "$FAKE_GH_LOG" && echo true || echo false)"
+t "preview: comment goes to the issue from a file, byte for byte" \
+  "$(grep -q '^issue comment https://github.com/acme/repo1/issues/3 --body-file /' "$FAKE_GH_LOG" && grep -qxF 'stdin: Looks good; $(id) stays text' "$FAKE_GH_LOG" && echo true || echo false)"
 
 # Limits count bytes: 30000 three-byte characters are 90KB, over 64KB,
 # and must be refused, not cut short and posted.
@@ -306,6 +306,14 @@ printf 'keep\n\n' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issue
 t "preview: an accepted comment keeps its trailing newlines" \
   "$(grep -qx 'stdin-bytes: 6' "$FAKE_GH_LOG" && echo true || echo false)"
 
+# Bash drops NUL bytes in $(...): a NUL must be refused, never let a tail
+# vanish or the count come out short.
+fresh_env
+out=$({ head -c 65536 /dev/zero | tr '\0' a; printf '\0PRIVATE TAIL'; } | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
+out2=$(printf 'a\0b' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull/7")
+t "preview: a comment with a NUL byte is refused, whatever its length" \
+  "$([[ $(jq -r '.error' <<<"$out") != null && $(jq -r '.error' <<<"$out2") != null ]] && ! grep -q 'comment' "$FAKE_GH_LOG" && echo true || echo false)"
+
 fresh_env
 export FAKE_GH_COMMENT_FAIL=1
 out=$(printf 'hi' | bash "$PREVIEW" comment "https://github.com/acme/repo1/issues/3" 2>&1)
@@ -324,17 +332,27 @@ out=$(printf '   ' | bash "$PREVIEW" comment "https://github.com/acme/repo1/pull
 t "preview: an empty comment is refused" "$(jqt '.error | length > 0' "$out")"
 
 fresh_env
-bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 >/dev/null
+echo '{"baseRefName": "main", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_GH_FIXTURES/pr-view.json"
+bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main >/dev/null
 t "preview: merge pins the head commit that was shown" \
   "$(grep -qxF 'pr merge https://github.com/acme/repo1/pull/7 --squash --match-head-commit abc123' "$FAKE_GH_LOG" && echo true || echo false)"
 
+# The base is not pinned by --match-head-commit: it is rechecked right
+# before merging, and a PR retargeted since the strip opened does not merge.
 fresh_env
-out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" octopus abc123)
-out2=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash "")
-out3=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/issues/7" squash abc123)
-verdicts="$(jqt '.error | length > 0' "$out") $(jqt '.error | length > 0' "$out2") $(jqt '.error | length > 0' "$out3")"
-t "preview: merge refuses an unknown method, a missing head sha, or an issue" \
-  "$([[ $verdicts == "true true true" && ! -s $FAKE_GH_LOG ]] && echo true || echo false)"
+echo '{"baseRefName": "production", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_GH_FIXTURES/pr-view.json"
+out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main)
+t "preview: a PR retargeted to another base is refused" \
+  "$([[ $(jq -r '.error' <<<"$out") == *production* ]] && ! grep -q 'pr merge' "$FAKE_GH_LOG" && echo true || echo false)"
+
+fresh_env
+out=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" octopus abc123 main)
+out2=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash "" main)
+out3=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/issues/7" squash abc123 main)
+out4=$(bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 "")
+verdicts="$(jqt '.error | length > 0' "$out") $(jqt '.error | length > 0' "$out2") $(jqt '.error | length > 0' "$out3") $(jqt '.error | length > 0' "$out4")"
+t "preview: merge refuses an unknown method, a missing head sha or base, or an issue" \
+  "$([[ $verdicts == "true true true true" && ! -s $FAKE_GH_LOG ]] && echo true || echo false)"
 
 # ------------------------------------------------- hostile cache-path shapes
 fresh_env
