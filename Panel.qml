@@ -827,7 +827,7 @@ Panel {
     if (previewOpen && previewMode === "merge")
       return "↵ confirm merge" + (previewData && previewData.mergeMethods && previewData.mergeMethods.length > 1 ? " · h/l method" : "") + " · Esc cancel"
     if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
-    if (previewOpen) return "j/k follow · ↵ open · c comment" + (previewData && previewData.kind === "pr" ? " · m merge" : "") + " · p close"
+    if (previewOpen) return "j/k follow · J/K scroll · ↵ open · c comment" + (previewData && previewData.kind === "pr" ? " · m merge" : "") + " · p close"
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
       if (!srow) return "space toggle · j/k move · s or Esc back"
@@ -1457,7 +1457,10 @@ Panel {
         else if (t === "p" && !root.settingsOpen && !root.keysOpen) root.togglePreview()
         else if (root.previewOpen && t === "c") root.startComment()
         else if (root.previewOpen && t === "m") root.startMerge()
-        else if (root.previewOpen && (t === "J" || t === "K")) root.scrollPreview(t === "J" ? 1 : -1)
+        // Ctrl+d and Ctrl+u arrive as control characters. J, K and the page
+        // keys are the Shortcuts next to the pane.
+        else if (root.previewOpen && t === "\u0004") root.scrollPreview(1)
+        else if (root.previewOpen && t === "\u0015") root.scrollPreview(-1)
         else if (root.keysOpen && t !== "s" && !(t === "/" && !root.settingsOpen)) return
         else if (t === "s") {
           if (root.settingsOpen) root.closeSettings()
@@ -1473,6 +1476,20 @@ Panel {
         else if (t === "/") root.openSearch()
         else if (t === "]") root.jumpSection(1)
         else if (t === "[") root.jumpSection(-1)
+      }
+
+      // Scrolling the preview. The key catcher sees Shift+j as a plain "j"
+      // (it would move the cursor), so these are shortcuts, which Qt handles
+      // before the key reaches it. Off while a comment is being typed.
+      Shortcut {
+        sequences: ["Shift+J", StandardKey.MoveToNextPage]
+        enabled: root.previewOpen && !root.commentFocused
+        onActivated: root.scrollPreview(1)
+      }
+      Shortcut {
+        sequences: ["Shift+K", StandardKey.MoveToPreviousPage]
+        enabled: root.previewOpen && !root.commentFocused
+        onActivated: root.scrollPreview(-1)
       }
 
       PreviewPane {
@@ -2125,7 +2142,7 @@ Panel {
         ["u", "Undo a dismissal (5 seconds)"],
         ["p", "Preview a PR or issue beside the list"],
         ["c  m", "In a preview: comment, merge"],
-        ["J K", "Scroll the preview"],
+        ["J K", "Scroll the preview (or PgDn PgUp, Ctrl+d Ctrl+u)"],
         ["/", "Fuzzy find"],
         ["f", "Focus mode on or off"],
         ["s", "Settings"],

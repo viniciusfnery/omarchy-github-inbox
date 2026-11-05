@@ -20,9 +20,22 @@ Item {
 
   implicitHeight: content.implicitHeight + actions.implicitHeight + Style.space(12)
 
+  // Half a page per press, gliding, the way Ctrl+d and Ctrl+u move in vim.
+  readonly property real maxScroll: Math.max(0, flick.contentHeight - flick.height)
+  readonly property bool moreBelow: flick.contentY < maxScroll - 1
+
   function scrollBy(direction) {
-    var maxY = Math.max(0, flick.contentHeight - flick.height)
-    flick.contentY = Math.max(0, Math.min(maxY, flick.contentY + direction * Style.space(80)))
+    scrollGlide.stop()
+    scrollGlide.to = Math.max(0, Math.min(maxScroll, flick.contentY + direction * flick.height * 0.5))
+    scrollGlide.start()
+  }
+
+  NumberAnimation {
+    id: scrollGlide
+    target: flick
+    property: "contentY"
+    duration: 140
+    easing.type: Easing.OutCubic
   }
 
   // A new item starts at its top.
@@ -101,7 +114,8 @@ Item {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     interactive: contentHeight > height
-    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+    // Always drawn when there is more to read, so the pane says it scrolls.
+    ScrollBar.vertical: ScrollBar { policy: pane.maxScroll > 0 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
 
     Column {
       id: content
@@ -372,6 +386,47 @@ Item {
           }
         }
       }
+    }
+  }
+
+  // While more is below: a fade over the last lines and how to get there.
+  Rectangle {
+    visible: pane.moreBelow && pane.full
+    anchors.left: flick.left
+    anchors.right: flick.right
+    anchors.bottom: flick.bottom
+    height: Style.space(36)
+    gradient: Gradient {
+      GradientStop { position: 0.0; color: "transparent" }
+      GradientStop { position: 1.0; color: Color.popups.background }
+    }
+  }
+
+  BorderSurface {
+    visible: pane.moreBelow && pane.full
+    anchors.right: flick.right
+    anchors.rightMargin: Style.space(14)
+    anchors.bottom: flick.bottom
+    implicitWidth: moreText.implicitWidth + Style.space(14)
+    implicitHeight: moreText.implicitHeight + Style.space(4)
+    radius: Style.cornerRadius
+    color: Color.popups.background
+    borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, 0.3), 1)
+
+    Text {
+      id: moreText
+      anchors.centerIn: parent
+      text: "↓ more · J"
+      textFormat: Text.PlainText
+      color: pane.inbox.dim
+      font.family: pane.inbox.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onClicked: pane.scrollBy(1)
     }
   }
 
