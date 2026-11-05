@@ -17,15 +17,24 @@ WheelHandler {
   property real velocity: 0
   property double lastTime: 0
   property bool fingers: false
+  // The device reports scroll phases, so a lift arrives as ScrollEnd.
+  property bool phased: false
 
   readonly property real maxY: Math.max(0, flick.contentHeight - flick.height)
 
-  function release() {
+  function release(fling) {
     lift.stop()
     // A pause before lifting means the fingers had stopped: no fling.
-    if (fingers && Date.now() - lastTime < 80 && Math.abs(velocity) > 100) flick.flick(0, velocity)
+    if (fling && fingers && Date.now() - lastTime < 80 && Math.abs(velocity) > 100) flick.flick(0, velocity)
     fingers = false
     velocity = 0
+  }
+
+  // Anything else moving the content (a key, a new item) stops ours first.
+  function stop() {
+    glide.stop()
+    flick.cancelFlick()
+    release(false)
   }
 
   // A handler takes no children: the animation and the timer are properties.
@@ -36,10 +45,12 @@ WheelHandler {
     easing.type: Easing.OutCubic
   }
 
-  // For a touchpad that reports no scroll phases: no event for 60 ms is a lift.
+  // No event for 60 ms is a lift on a touchpad without phases. With phases
+  // a lift is ScrollEnd, and this only clears a gesture whose end went to
+  // another handler, with no fling.
   readonly property Timer lift: Timer {
-    interval: 60
-    onTriggered: wheel.release()
+    interval: wheel.phased ? 300 : 60
+    onTriggered: wheel.release(!wheel.phased)
   }
 
   onWheel: function(event) {
@@ -51,8 +62,9 @@ WheelHandler {
       || (event.device && event.device.type === PointerDevice.TouchPad)
     if (touch) {
       glide.stop()
+      if (phase !== Qt.NoScrollPhase) phased = true
       if (phase === Qt.ScrollBegin) { flick.cancelFlick(); fingers = true; velocity = 0 }
-      if (phase === Qt.ScrollEnd) { release(); event.accepted = true; return }
+      if (phase === Qt.ScrollEnd) { release(true); event.accepted = true; return }
       if (!fingers) flick.cancelFlick()
       fingers = true
       var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 8
@@ -62,7 +74,7 @@ WheelHandler {
       velocity = dt > 100 ? 0 : 0.6 * (dy * 1000 / dt) + 0.4 * velocity
       lastTime = now
       flick.contentY = Math.max(0, Math.min(maxY, flick.contentY - dy))
-      if (phase === Qt.NoScrollPhase) lift.restart()
+      lift.restart()
     } else {
       // Quick notches add up: each one extends the glide already running.
       var from = glide.running ? glide.to : flick.contentY

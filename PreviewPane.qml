@@ -37,7 +37,7 @@ Item {
 
   function scrollBy(direction) {
     scrollGlide.stop()
-    flick.cancelFlick()
+    paneWheel.stop()
     scrollGlide.to = Math.max(0, Math.min(maxScroll, flick.contentY + direction * flick.height * 0.5))
     scrollGlide.start()
   }
@@ -55,6 +55,7 @@ Item {
     target: pane.inbox
     function onPreviewUrlChanged() {
       scrollGlide.stop()
+      paneWheel.stop()
       flick.contentY = 0
     }
   }
@@ -99,7 +100,11 @@ Item {
 
   function plainBody(text) { return Inbox.plainText(text) }
   readonly property var review: full && isPr
-    ? Inbox.reviewLine(d.reviews, d.requested, String(inbox.feed.user || ""), String(d.reviewDecision || "")) : null
+    ? Inbox.reviewLine(d.reviews, d.requested, String(inbox.feed.user || ""), String(d.reviewDecision || ""),
+      inbox.allReviews.some(function(r) { return String(r.url) === String(d.url) })) : null
+  readonly property bool approved: full && isPr && (d.reviews || []).some(function(r) { return r.state === "APPROVED" })
+  readonly property var changesBy: full && isPr
+    ? (d.reviews || []).filter(function(r) { return r.state === "CHANGES_REQUESTED" }).map(function(r) { return "@" + r.author }) : []
 
   Rectangle {
     visible: !pane.solo
@@ -199,14 +204,15 @@ Item {
     anchors.top: header.visible ? header.bottom : parent.top
     anchors.topMargin: header.visible ? Style.space(10) : 0
     anchors.bottom: actions.top
-    // Room for "↓ more", so it never sits on the text.
-    anchors.bottomMargin: pane.full ? moreChip.implicitHeight + Style.space(8) : Style.space(4)
+    // Room for the top half of "↓ more", which sits on the edge line.
+    anchors.bottomMargin: pane.full ? moreChip.implicitHeight / 2 + Style.space(3) : Style.space(4)
     contentWidth: width
     contentHeight: content.implicitHeight
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     interactive: contentHeight > height
     SmoothWheel {
+      id: paneWheel
       flick: flick
       onScrolled: scrollGlide.stop()
     }
@@ -263,7 +269,7 @@ Item {
           color: pane.inbox.dim
           font.family: pane.inbox.fontFamily
           font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          wrapMode: Text.Wrap
         }
 
         Text {
@@ -314,7 +320,7 @@ Item {
           tone: pane.inbox.mergeBlock === "" || draft ? pane.inbox.foreground : (checking ? pane.inbox.dim : pane.inbox.urgent)
           text: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock
             : (pane.checksFailing ? "Can merge into " + pane.d.base + ", but checks are failing"
-              : "Ready to merge into " + pane.d.base)
+              : (pane.approved ? "Ready to merge into " + pane.d.base : "Can merge into " + pane.d.base))
         }
       }
 
@@ -437,17 +443,38 @@ Item {
               font.pixelSize: Style.font.bodySmall
             }
 
-            Text {
+            // A table row is a record: its first cell bold, the rest under
+            // it. A header row names the columns, dim and small.
+            Column {
               id: quoteText
               width: parent.width - parent.leftPadding - (bulletText.visible ? bulletText.width + parent.spacing : 0)
                 - (blockRow.quote ? 2 + parent.spacing : 0)
-              text: modelData.text
-              textFormat: Text.PlainText
-              color: modelData.urgent ? pane.inbox.urgent : (blockRow.quote ? pane.inbox.dim : pane.inbox.foreground)
-              font.family: pane.inbox.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: modelData.heading
-              wrapMode: Text.Wrap
+              spacing: Style.space(1)
+
+              Text {
+                visible: blockRow.modelData.label !== undefined
+                width: parent.width
+                text: blockRow.modelData.label !== undefined ? blockRow.modelData.label : ""
+                textFormat: Text.PlainText
+                color: blockRow.quote ? pane.inbox.dim : pane.inbox.foreground
+                font.family: pane.inbox.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+                wrapMode: Text.Wrap
+              }
+
+              Text {
+                width: parent.width
+                leftPadding: blockRow.modelData.label !== undefined ? Style.space(14) : 0
+                text: blockRow.modelData.text
+                textFormat: Text.PlainText
+                color: blockRow.modelData.urgent ? pane.inbox.urgent
+                  : (blockRow.quote || blockRow.modelData.columns ? pane.inbox.dim : pane.inbox.foreground)
+                font.family: pane.inbox.fontFamily
+                font.pixelSize: blockRow.modelData.columns ? Style.font.caption : Style.font.bodySmall
+                font.bold: blockRow.modelData.heading
+                wrapMode: Text.Wrap
+              }
             }
           }
         }
@@ -612,8 +639,9 @@ Item {
     visible: pane.moreBelow && pane.full
     anchors.right: flick.right
     anchors.rightMargin: Style.space(14)
-    anchors.top: flick.bottom
-    anchors.topMargin: Style.space(4)
+    // Sits on the line that ends the scroll area, so it covers no text and
+    // leaves no empty band once the end is reached.
+    anchors.verticalCenter: actions.top
     implicitWidth: moreText.implicitWidth + Style.space(14)
     implicitHeight: moreText.implicitHeight + Style.space(4)
     radius: Style.cornerRadius
@@ -891,12 +919,13 @@ Item {
           wrapMode: Text.Wrap
         }
 
-        // Someone was asked to review and nobody has approved yet.
+        // A change request, or a review asked for and no approval yet.
         Text {
-          visible: pane.full && pane.isPr && !!pane.d.requested && pane.d.requested.length > 0
-            && !(pane.d.reviews || []).some(function(r) { return r.state === "APPROVED" })
+          visible: pane.changesBy.length > 0 || (pane.full && pane.isPr && !pane.approved
+            && !!pane.d.requested && pane.d.requested.length > 0)
           width: parent.width
-          text: "No approvals yet, and reviews are still requested."
+          text: pane.changesBy.length > 0 ? pane.changesBy.join(", ") + " requested changes."
+            : "No approvals yet, and reviews are still requested."
           textFormat: Text.PlainText
           color: pane.inbox.urgent
           font.family: pane.inbox.fontFamily

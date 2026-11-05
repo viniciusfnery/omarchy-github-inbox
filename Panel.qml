@@ -1270,6 +1270,7 @@ Panel {
 
   function ensureVisible(rowItem) {
     if (!panelFlick || !rowItem) return
+    listWheel.stop()
     // While the panel's height is still animating open the view can be
     // shorter than the row; scrolling then would push the header away.
     if (panelFlick.height < rowItem.height + Style.space(44)) return
@@ -1641,7 +1642,7 @@ Panel {
     }
     // Scroll the open preview by n half pages (negative goes up).
     function scroll(n: string): string {
-      root.routedInstance().scrollPreview(parseInt(n, 10) || 1)
+      root.routedInstance().scrollPreview(Math.max(-20, Math.min(20, parseInt(n, 10) || 1)))
       return "ok"
     }
     function find(): string {
@@ -1912,7 +1913,7 @@ Panel {
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-        SmoothWheel { flick: panelFlick }
+        SmoothWheel { id: listWheel; flick: panelFlick }
 
         Column {
           id: column

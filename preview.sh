@@ -80,8 +80,11 @@ view)
   jq -e '.data.repository.item | type == "object"' >/dev/null 2>&1 <<<"$json" || fail "GitHub did not return this $noun"
   jq --arg kind "$kind" '
     # HTML comments (bots open with long hidden ones) go before the cut, so
-    # the cut keeps text a reader would see.
-    def cut($n): (. // "") | gsub("<!--[\\s\\S]*?-->"; "") | if length > $n then .[0:$n] + "…" else . end;
+    # the cut keeps text a reader would see. split and index, not a lazy
+    # regex, which is quadratic on a body of unclosed "<!--". Text after an
+    # unclosed one goes, as on GitHub.
+    def nocomments: split("<!--") | .[0] + ([.[1:][] | index("-->") as $i | if $i then .[$i + 3:] else "" end] | add // "");
+    def cut($n): (. // "") | nocomments | if length > $n then .[0:$n] + "…" else . end;
     def login: ((. // {}).login // "");
     .data.repository as $r | $r.item as $p |
     {
@@ -102,7 +105,8 @@ view)
         | map({author: (.author | login), createdAt: (.createdAt // ""), body: (.body | cut(400)), state: (.state // ""),
           bot: (((.author // {}).__typename // "") == "Bot" or ((.author | login) | endswith("[bot]")))})),
       commentTotal: ((($p.comments.totalCount) // 0)
-        + ([($p.reviews.nodes // [])[] | select(((.body // "") != "") or (.state | IN("APPROVED", "CHANGES_REQUESTED")))] | length))
+        # Every review counts, as on GitHub, so the total never reads low.
+        + (($p.reviews.totalCount) // 0))
     } + if $kind == "pr" then {
       reviewDecision: ($p.reviewDecision // ""),
       reviews: [($p.latestOpinionatedReviews.nodes // [])[] | {author: (.author | login), state: (.state // "")}][0:10],

@@ -274,9 +274,19 @@ t "preview: one GraphQL call, owner and repo as strings" \
 t "preview: someone with write access can merge" "$(jqt '.canMerge == true' "$out")"
 t "preview: comment authors carry whether they are bots" \
   "$(jqt '[.comments[].bot] == [false, true, false]' "$out")"
-t "preview: the comment total counts reviews with something to show" "$(jqt '.commentTotal == 41' "$out")"
+t "preview: the comment total counts comments and reviews" "$(jqt '.commentTotal == 42' "$out")"
 t "preview: an HTML comment is dropped before the cut, so the text after it shows" \
   "$(jqt '.comments[2].body == "after the hidden part"' "$out")"
+# A body of unclosed "<!--" is linear to clean, not quadratic.
+jq --arg b "$(python3 -c "print('<!--' * 16384, end='')")" '.data.repository.item.body = $b
+  | .data.repository.item.comments.nodes[].body = $b' "$FAKE_GH_FIXTURES/graphql.json" >"$FAKE_GH_FIXTURES/g3"
+cp "$FAKE_GH_FIXTURES/graphql.json" "$FAKE_GH_FIXTURES/g4" && mv "$FAKE_GH_FIXTURES/g3" "$FAKE_GH_FIXTURES/graphql.json"
+start=$(date +%s%N)
+hostile=$(bash "$PREVIEW" view "https://github.com/acme/repo1/pull/7")
+ms=$(( ($(date +%s%N) - start) / 1000000 ))
+mv "$FAKE_GH_FIXTURES/g4" "$FAKE_GH_FIXTURES/graphql.json"
+t "preview: 64 KB of unclosed HTML comments cleans in under a second ($ms ms)" \
+  "$([[ $ms -lt 1000 ]] && jq -e '.body == "" and .comments[0].body == ""' >/dev/null <<<"$hostile" && echo true || echo false)"
 t "preview: who reviewed, who is asked, and when it was updated" \
   "$(jqt '.reviews == [{author: "carol", state: "APPROVED"}, {author: "dan", state: "COMMENTED"}] and .requested == ["erin", "acme/core"] and .updatedAt == "2026-01-04T00:00:00Z"' "$out")"
 jq '.data.repository.item.reviews.nodes[0].createdAt = "2026-01-05T00:00:00Z"' "$FAKE_GH_FIXTURES/graphql.json" >"$FAKE_GH_FIXTURES/g2" &&

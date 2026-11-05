@@ -232,6 +232,11 @@ function cleanLine(line) {
     // A fixed set of entities, &amp; last so "&amp;lt;" stays "&lt;".
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
     .replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+    // Check marks as the text glyph, not three different color emoji.
+    .replace(/\u2705|\u2714\ufe0f?|\u2611\ufe0f?/g, "\u2713")
+    // A word joiner keeps a closing bracket on its word's line: Qt would
+    // otherwise start a wrapped CJK line with it.
+    .replace(/([\u3000-\u9fff\uff00-\uffef])([>)\]\u300d\u300f\u3011\uff09])/g, "$1\u2060$2")
 }
 
 // The description as blocks for the pane: headings, paragraphs, list
@@ -315,7 +320,13 @@ function bodyBlocks(text, maxBlocks) {
       paraQuote = true
     } else if (/^\s*\|/.test(raw)) {
       flush()
-      block(i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1]), cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · "), "", 0, htmlQuote)
+      // The row above |---| names the columns. A data row leads with its
+      // first cell, so the rows scan as records and not as one paragraph.
+      var cells = cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/)
+      block(false, cells.join(" · "), "", 0, htmlQuote)
+      var row = blocks[blocks.length - 1]
+      if (i + 1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])) row.columns = true
+      else if (cells.length > 1) { row.text = cells.slice(1).join(" · "); row.label = cells[0] }
     } else if (/^#{1,6}\s+/.test(raw) || htmlHeading) {
       flush()
       block(true, cleanLine(htmlHeading ? htmlHeading[1] : raw.replace(/^#{1,6}\s+/, "")).trim(), "", 0, htmlQuote)
@@ -357,7 +368,9 @@ function plainText(text) {
 // The review line: who approved, who asked for changes, and who is still
 // asked, with the viewer named as "your review". Reviews that only
 // commented carry no verdict and are left out.
-function reviewLine(reviews, requested, viewer, decision) {
+// askedOfYou: the inbox lists it under review requests, which also covers
+// a request to one of your teams.
+function reviewLine(reviews, requested, viewer, decision, askedOfYou) {
   function names(list) {
     return list.slice(0, 2).map(function(n) { return "@" + n }).join(", ") + (list.length > 2 ? " +" + (list.length - 2) : "")
   }
@@ -373,6 +386,7 @@ function reviewLine(reviews, requested, viewer, decision) {
     if (me !== "" && String(q[k]).toLowerCase() === me) youAsked = true
     else waiting.push(String(q[k]))
   }
+  if (askedOfYou === true) youAsked = true
   var parts = []
   if (changes.length > 0) parts.push("changes requested by " + names(changes))
   if (approved.length > 0) parts.push("approved by " + names(approved))

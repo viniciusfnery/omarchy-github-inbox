@@ -174,8 +174,8 @@ t("body blocks: headings, paragraphs, bullets with their depth, numbered items, 
     { heading: false, text: "top", bullet: "•", indent: 0 },
     { heading: false, text: "nested code", bullet: "•", indent: 1 },
     { heading: false, text: "first", bullet: "1.", indent: 0 },
-    { heading: true, text: "a · b", bullet: "", indent: 0 },
-    { heading: false, text: "1 · 2", bullet: "", indent: 0 }])
+    { heading: false, text: "a · b", bullet: "", indent: 0, columns: true },
+    { heading: false, text: "2", bullet: "", indent: 0, label: "1" }])
 })
 t("markdown noise: images, links, checkboxes, fences, details and quotes read as text", () => {
   const b = I.bodyBlocks("![shot](https://github.com/user-attachments/x.png)\n<img src=\"https://e.x/a.png\" width=\"300\">\nSee [the docs](https://x.y/z)\n```yaml\nkey: 1\n```\n- [ ] todo\n- [x] done\n<details><summary>More</summary>\nhidden\n</details>")
@@ -256,11 +256,24 @@ t("quotes: a closing tag hidden in an HTML comment still counts as the last clos
 })
 
 t("comments: emoji codes read as emoji, and tags or links cut by the 400-character limit go", () => {
-  assert.strictEqual(I.plainText(":white_check_mark: All lines covered :x: one :warning:"), "✅ All lines covered ❌ one ⚠️")
+  assert.strictEqual(I.plainText(":white_check_mark: All lines covered :x: one :warning:"), "✓ All lines covered ❌ one ⚠️")
   assert.strictEqual(I.plainText("Summary\n<source media=\"(prefers-color-scheme: dark)\" srcset=\"https://storage.googleapis.com/coderab…"), "Summary")
   assert.strictEqual(I.plainText("Comparing base ([2f4d84f](https://app.codecov.io/gh/ut-issl/cosmica/commit…"), "Comparing base (2f4d84f")
 })
 
+t("tables: a header row is column names, a data row leads with its first cell", () => {
+  eq(I.bodyBlocks("| key | value | note |\n|---|---|---|\n| a | 1 | x |\n| only |"), [
+    { heading: false, text: "key · value · note", bullet: "", indent: 0, columns: true },
+    { heading: false, text: "1 · x", bullet: "", indent: 0, label: "a" },
+    { heading: false, text: "only", bullet: "", indent: 0 }])
+})
+t("text: a closing bracket never starts a wrapped line, and check marks read as text", () => {
+  assert.strictEqual(I.cleanLine("chore/bump-cabosu-<版> の PR（下書き）"), "chore/bump-cabosu-<版\u2060> の PR（下書き\u2060）")
+  assert.strictEqual(I.plainText("✅ All covered ✔️ ok ☑️ done"), "✓ All covered ✓ ok ✓ done")
+})
+t("reviews: a request to your team counts as yours", () => {
+  eq(I.reviewLine([], ["org/team"], "me", "", true), { text: "No reviews yet · your review is requested", tone: "ask" })
+})
 t("comments: list markers read as bullets", () => {
   assert.strictEqual(I.plainText("Checked:\n- one\n  * two\n1. three"), "Checked:\n• one\n  • two\n1. three")
 })
