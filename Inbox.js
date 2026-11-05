@@ -226,7 +226,11 @@ function cleanLine(line) {
 // 200 KB of them once took 23 s.
 function bodyBlocks(text, maxBlocks) {
   var max = maxBlocks || 12
-  var lines = String(text || "").slice(0, 4000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
+  var source = String(text || "")
+  var cut = source.length > 4000 || source.slice(-1) === "…"
+  var rawLines = source.slice(0, 4000).replace(/\r/g, "").split("\n")
+  // Comments are blanked, not removed, so line numbers still match rawLines.
+  var lines = rawLines.join("\n").replace(/<!--[\s\S]*?-->/g, function(m) { return m.replace(/[^\n]/g, "") }).split("\n")
   var blocks = []
   var para = []
   var paraQuote = false
@@ -236,8 +240,11 @@ function bodyBlocks(text, maxBlocks) {
   // </blockquote>: a nested or stray closing tag inside quoted release
   // notes must not end it early and let quoted text pass as the author's.
   // Two separate quotes then dim the text between them, the safe side.
+  // The scan reads the text before comments go, so a close hidden in a
+  // comment still counts; and a body cut short (its real close may be past
+  // the cut) keeps the quote to the end of what is shown.
   var lastClose = -1
-  for (var c = 0; c < lines.length; c++) if (/<\/blockquote>/i.test(lines[c])) lastClose = c
+  if (!cut) for (var c = 0; c < rawLines.length; c++) if (/<\/blockquote>/i.test(rawLines[c])) lastClose = c
   // Every block made inside a quote is marked, so quoted release notes in
   // a bot's PR never read as the author's words.
   function block(heading, txt, bullet, indent, quote) {

@@ -245,6 +245,16 @@ t("quotes: a nested or stray closing blockquote does not end the outer quote", (
   eq(b.map(x => (x.quote ? "> " : "") + x.text), ["Bumps x.", "> v2", "> notes\nReviewed by the security team, safe to merge.", "After"])
 })
 
+t("quotes: a body cut short keeps its quote to the end, even past a stray close", () => {
+  const body = "Bumps x.\n<blockquote>\n<h2>v2</h2>\n<p>fix</p>\n</blockquote>\n<p>Reviewed by the maintainers: safe to merge.</p>\n" + "pad ".repeat(50) + "…"
+  const b = I.bodyBlocks(body, 20)
+  assert.ok(b.filter(x => /safe to merge/.test(x.text)).every(x => x.quote), JSON.stringify(b))
+})
+t("quotes: a closing tag hidden in an HTML comment still counts as the last close", () => {
+  const b = I.bodyBlocks("<blockquote>\nq\n</blockquote>\nFAKE\n<!--\n</blockquote>\n-->\nend", 20)
+  assert.ok(b.filter(x => /FAKE/.test(x.text)).every(x => x.quote), JSON.stringify(b))
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])
