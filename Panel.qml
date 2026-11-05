@@ -1671,10 +1671,11 @@ Panel {
         else if (root.previewOpen && (t === "r" || t === "R")) root.refreshNow()
         else if (root.previewOpen && t === "c") root.startComment()
         else if (root.previewOpen && t === "m") root.startMerge()
-        // Ctrl+d and Ctrl+u arrive as control characters. J, K and the page
-        // keys are the Shortcuts next to the pane.
-        else if (root.previewOpen && t === "\u0004") root.scrollPreview(1)
-        else if (root.previewOpen && t === "\u0015") root.scrollPreview(-1)
+        // Ctrl+d and Ctrl+u arrive as control characters. Shift+J and Shift+K
+        // are Shortcuts next to the pane; a capital J or K that arrives as
+        // text (some input methods send no Shift) scrolls here.
+        else if (root.previewOpen && (t === "J" || t === "\u0004")) root.scrollPreview(1)
+        else if (root.previewOpen && (t === "K" || t === "\u0015")) root.scrollPreview(-1)
         else if (root.keysOpen && t !== "s" && !(t === "/" && !root.settingsOpen)) return
         else if (t === "s") {
           if (root.settingsOpen) root.closeSettings()
