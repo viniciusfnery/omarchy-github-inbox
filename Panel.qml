@@ -577,9 +577,10 @@ Panel {
   // After a finished comment or merge the pane stays on its item, notice
   // and all, until the user moves; only a cancel catches up at once.
   property bool holdAfterAction: false
-  // Deliberate moves (keys, pointer) stamp lastUserMoveAt. A cursor change
-  // without one (a refresh removed the merged PR, say) keeps the result.
-  property double lastUserMoveAt: 0
+  // Keys and real pointer motion call this before moving the cursor. A
+  // cursor change without it (a refresh removed the merged PR, say) keeps
+  // the finished action's item and notice on screen.
+  function releaseHold() { holdAfterAction = false }
   onPreviewModeChanged: {
     if (previewMode !== "" || !previewOpen || actionBusy) return
     if (holdAfterAction) return
@@ -615,10 +616,8 @@ Panel {
   // so `p` usually opens on a cache hit.
   onCursorUrlChanged: {
     if (!opened) return
-    if (holdAfterAction) {
-      if (Date.now() - lastUserMoveAt > 300) return
-      holdAfterAction = false
-    }
+    // Only a deliberate move releases a held result (see releaseHold).
+    if (holdAfterAction) return
     // A row with nothing to preview empties the pane rather than leaving
     // the last PR there for Enter to open; comment and merge keep theirs.
     if (cursorUrl === "") {
@@ -1135,7 +1134,7 @@ Panel {
   }
 
   function moveCursor(delta) {
-    lastUserMoveAt = Date.now()
+    releaseHold()
     if (rowCount === 0) return
     hoverGate.reset()
     cursorFromKeyboard = true
@@ -1155,7 +1154,7 @@ Panel {
   }
 
   function jumpSection(direction) {
-    lastUserMoveAt = Date.now()
+    releaseHold()
     var starts = sectionStarts()
     if (starts.length === 0) return
     hoverGate.reset()
@@ -2738,7 +2737,7 @@ Panel {
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       onPositionChanged: function(mouse) {
         if (!hoverGate.moved(rowMouse, mouse)) return
-        root.lastUserMoveAt = Date.now()
+        root.releaseHold()
         // Handing over from the keyboard: the row it opened stays open as
         // lingering, so the switch itself moves nothing.
         if (root.cursorFromKeyboard) root.lingerOpenRow()

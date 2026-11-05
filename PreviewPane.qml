@@ -49,7 +49,10 @@ Item {
   // A new item starts at its top.
   Connections {
     target: pane.inbox
-    function onPreviewUrlChanged() { flick.contentY = 0 }
+    function onPreviewUrlChanged() {
+      scrollGlide.stop()
+      flick.contentY = 0
+    }
   }
 
 
@@ -130,7 +133,7 @@ Item {
       id: header
       // Pinned above the scrolling content, so the item an action is about
       // and the way out (Back, Close) are always in view.
-      visible: pane.d !== null || pane.solo
+      visible: pane.inbox.previewOpen
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.rightMargin: Style.space(8)
@@ -155,7 +158,7 @@ Item {
         id: headerText
         anchors.left: backButton.visible ? backButton.right : parent.left
         anchors.leftMargin: backButton.visible ? Style.space(6) : 0
-        anchors.right: statePill.visible ? statePill.left : parent.right
+        anchors.right: statePill.visible ? statePill.left : (closeButton.visible ? closeButton.left : parent.right)
         anchors.rightMargin: Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
         text: pane.d ? (pane.isPr ? "  " : "  ")
@@ -557,7 +560,10 @@ Item {
       }
     }
 
+    // Three lines at most, so a long error never pushes the editor or the
+    // buttons off the pane; hovering shows all of it.
     Text {
+      id: noticeText
       visible: pane.inbox.previewNotice !== ""
       width: parent.width
       text: pane.inbox.previewNotice
@@ -566,6 +572,21 @@ Item {
       font.family: pane.inbox.fontFamily
       font.pixelSize: Style.font.caption
       wrapMode: Text.Wrap
+      maximumLineCount: 3
+      elide: Text.ElideRight
+
+      MouseArea {
+        id: noticeMouse
+        anchors.fill: parent
+        hoverEnabled: true
+        acceptedButtons: Qt.NoButton
+      }
+
+      PanelToolTip {
+        visible: noticeText.truncated && noticeMouse.containsMouse
+        text: pane.inbox.previewNotice
+        fontFamily: pane.inbox.fontFamily
+      }
     }
 
     // Comment box: visible only after `c` or the Comment button.
