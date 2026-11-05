@@ -268,7 +268,7 @@ t("tables: a header row is column names, a data row leads with its first cell", 
     { heading: false, text: "only", bullet: "", indent: 0 }])
 })
 t("text: a closing bracket never starts a wrapped line, and check marks read as text", () => {
-  assert.strictEqual(I.cleanLine("chore/bump-cabosu-<版> の PR（下書き）"), "chore/bump-cabosu-<版\u2060> の PR（下書き\u2060）")
+  assert.strictEqual(I.cleanLine("chore/bump-cabosu-<版> の PR（下書き）"), "chore/bump-cabosu-<\u2060版\u2060> の PR（\u2060下書き\u2060）")
   assert.strictEqual(I.plainText("✅ All covered ✔️ ok ☑️ done"), "✓ All covered ✓ ok ✓ done")
 })
 t("reviews: a request to your team counts as yours", () => {

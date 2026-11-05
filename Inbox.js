@@ -237,6 +237,7 @@ function cleanLine(line) {
     // A word joiner keeps a closing bracket on its word's line: Qt would
     // otherwise start a wrapped CJK line with it.
     .replace(/([\u3000-\u9fff\uff00-\uffef])([>)\]\u300d\u300f\u3011\uff09])/g, "$1\u2060$2")
+    .replace(/([<(\[\u300c\u300e\u3010\uff08])([\u3000-\u9fff\uff00-\uffef])/g, "$1\u2060$2")
 }
 
 // The description as blocks for the pane: headings, paragraphs, list

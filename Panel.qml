@@ -1270,7 +1270,6 @@ Panel {
 
   function ensureVisible(rowItem) {
     if (!panelFlick || !rowItem) return
-    listWheel.stop()
     // While the panel's height is still animating open the view can be
     // shorter than the row; scrolling then would push the header away.
     if (panelFlick.height < rowItem.height + Style.space(44)) return
@@ -1278,11 +1277,15 @@ Panel {
     // Top padding keeps the section header in view.
     var padTop = Style.space(36)
     var padBottom = Style.space(8)
-    if (y - padTop < panelFlick.contentY)
+    // A scroll still running stops only when this one takes over.
+    if (y - padTop < panelFlick.contentY) {
+      listWheel.stop()
       panelFlick.contentY = Math.max(0, y - padTop)
-    else if (y + rowItem.height + padBottom > panelFlick.contentY + panelFlick.height)
+    } else if (y + rowItem.height + padBottom > panelFlick.contentY + panelFlick.height) {
+      listWheel.stop()
       panelFlick.contentY = Math.min(Math.max(0, panelFlick.contentHeight - panelFlick.height),
                                      y + rowItem.height + padBottom - panelFlick.height)
+    }
   }
 
   // Find lives in the inbox, so it leaves settings and scrolls to the field.

@@ -636,6 +636,8 @@ Item {
 
   BorderSurface {
     id: moreChip
+    // Above the edge line it sits on, which the actions column draws later.
+    z: 1
     visible: pane.moreBelow && pane.full
     anchors.right: flick.right
     anchors.rightMargin: Style.space(14)
