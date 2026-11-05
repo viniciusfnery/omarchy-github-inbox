@@ -166,6 +166,23 @@ t("hold: deliberate moves, searches and org switches release it, a refresh never
   for (const cause of ["refresh", "settings", "", "anything else"]) assert.strictEqual(I.releasesHold(cause), false, cause)
 })
 
+t("body blocks: headings, paragraphs, bullets with their depth, numbered items, table rows", () => {
+  const b = I.bodyBlocks("## Summary\nSome **bold** text\nmore\n\n- top\n  - nested `code`\n1. first\n| a | b |\n|---|---|\n| 1 | 2 |")
+  eq(b, [
+    { heading: true, text: "Summary", bullet: "", indent: 0 },
+    { heading: false, text: "Some bold text\nmore", bullet: "", indent: 0 },
+    { heading: false, text: "top", bullet: "•", indent: 0 },
+    { heading: false, text: "nested code", bullet: "•", indent: 1 },
+    { heading: false, text: "first", bullet: "1.", indent: 0 },
+    { heading: false, text: "a · b", bullet: "", indent: 0 },
+    { heading: false, text: "1 · 2", bullet: "", indent: 0 }])
+})
+t("markdown noise: images, links, checkboxes, fences, details and quotes read as text", () => {
+  const b = I.bodyBlocks("![shot](https://github.com/user-attachments/x.png)\n<img src=\"https://e.x/a.png\" width=\"300\">\nSee [the docs](https://x.y/z)\n```yaml\nkey: 1\n```\n- [ ] todo\n- [x] done\n<details><summary>More</summary>\nhidden\n</details>")
+  eq(b.map(x => x.bullet + x.text), ["[image]\n[image]\nSee the docs\nkey: 1", "☐ todo", "☑ done", "More\nhidden"])
+  assert.strictEqual(I.plainText("> quoted reply\nmy answer with [a link](https://x)\n\n\n\nend"), "my answer with a link\n\nend")
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

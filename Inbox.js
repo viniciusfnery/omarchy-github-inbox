@@ -197,3 +197,68 @@ function followDecision(st) {
 function releasesHold(cause) {
   return ["key", "jump", "pointer", "search", "org"].indexOf(cause) >= 0
 }
+
+// Markdown shown as plain text (never rendered, so nothing in it can
+// become markup): what GitHub bodies are full of reads as words.
+function cleanLine(line) {
+  return String(line)
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "[image]")
+    .replace(/<img[^>]*>/gi, "[image]")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/<\/?(details|summary|br|sub|sup|p|div|b|i|em|strong|code|kbd)\b[^>]*>/gi, "")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/(\*\*|__)(.+?)\1/g, "$2")
+}
+
+// The description as blocks for the pane: headings, paragraphs, list
+// items with their depth (so a wrapped item keeps its indent), and table
+// rows as "a · b · c". Code fences keep their content and lose the fence.
+function bodyBlocks(text, maxBlocks) {
+  var max = maxBlocks || 12
+  var lines = String(text || "").replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
+  var blocks = []
+  var para = []
+  function block(heading, txt, bullet, indent) {
+    blocks.push({ heading: heading, text: txt, bullet: bullet, indent: indent })
+  }
+  function flush() {
+    var t = para.join("\n").trim()
+    if (t !== "") block(false, t, "", 0)
+    para = []
+  }
+  for (var i = 0; i < lines.length && blocks.length < max; i++) {
+    var raw = lines[i]
+    if (/^\s*```/.test(raw)) continue
+    if (/^\s*\|[\s:|-]+\|\s*$/.test(raw)) continue
+    // A table row the 1200-character cut ended early has no closing pipe.
+    if (/^\s*\|/.test(raw)) {
+      flush()
+      block(false, cleanLine(raw).trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · "), "", 0)
+      continue
+    }
+    var h = /^#{1,6}\s+(.*)$/.exec(raw)
+    if (h) { flush(); block(true, cleanLine(h[1]).trim(), "", 0); continue }
+    var li = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(raw)
+    if (li) {
+      flush()
+      var indent = Math.min(4, Math.floor(li[1].length / 2))
+      var box = /^\[( |x|X)\]\s+(.*)$/.exec(li[3])
+      if (box) block(false, (box[1] === " " ? "☐ " : "☑ ") + cleanLine(box[2]).trim(), "", indent)
+      else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent)
+      continue
+    }
+    var line = cleanLine(raw.replace(/^\s*>\s?/, ""))
+    if (line.trim() === "") flush()
+    else para.push(line)
+  }
+  flush()
+  return blocks.slice(0, max)
+}
+
+// A comment as plain text: quoted lines (the reply's context) go.
+function plainText(text) {
+  return String(text || "").replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "")
+    .split("\n").filter(function(l) { return !/^\s*>/.test(l) && !/^\s*```/.test(l) })
+    .map(function(l) { return cleanLine(l.replace(/^#{1,6}\s+/, "")) })
+    .join("\n").replace(/\n{3,}/g, "\n\n").trim()
+}

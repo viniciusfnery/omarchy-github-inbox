@@ -83,53 +83,13 @@ Item {
   // Bodies are markdown, shown as plain text (never rendered, so nothing in
   // them can become markup): HTML comments, heading marks, emphasis marks
   // and runs of blank lines go.
-  // The description as heading and paragraph blocks, at most 12.
-  readonly property var bodyBlocks: {
-    if (!full) return []
-    var lines = String(d.body || "").replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
-    var blocks = []
-    var para = []
-    function flush() {
-      var t = para.join("\n").replace(/(\*\*|__)(.+?)\1/g, "$2").trim()
-      if (t !== "") blocks.push({ heading: false, text: t })
-      para = []
-    }
-    for (var i = 0; i < lines.length && blocks.length < 12; i++) {
-      var line = lines[i].replace(/`([^`]+)`/g, "$1").replace(/^(\s*)[-*]\s+/, "$1• ")
-      // Each table row is its own block, "a · b · c"; the |---| rule goes.
-      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue
-      // A row the 1200-character cut ended early has no closing pipe.
-      if (/^\s*\|/.test(line)) {
-        flush()
-        blocks.push({ heading: false, text: line.trim().replace(/^\|\s*|\s*\|$/g, "").split(/\s*\|\s*/).join(" · ") })
-        continue
-      }
-      var m = /^#{1,6}\s+(.*)$/.exec(line)
-      if (m) { flush(); blocks.push({ heading: true, text: m[1].replace(/(\*\*|__)(.+?)\1/g, "$2").trim() }) }
-      else if (line.trim() === "") flush()
-      else para.push(line)
-    }
-    flush()
-    return blocks
-  }
-
+  // The description as blocks (Inbox.bodyBlocks, tested): headings,
+  // paragraphs, list items with their depth, table rows.
+  readonly property var bodyBlocks: full ? Inbox.bodyBlocks(d.body, 12) : []
   // True when the 12-block cap left something out.
-  readonly property bool bodyCapped: {
-    if (!full) return false
-    var rest = String(d.body || "").split("\n")
-    var count = 0
-    for (var i = 0; i < rest.length; i++) if (rest[i].trim() !== "") count++
-    return bodyBlocks.length >= 12 && count > 12
-  }
+  readonly property bool bodyCapped: full && Inbox.bodyBlocks(d.body, 13).length > 12
 
-  function plainBody(text) {
-    return String(text || "").replace(/\r/g, "")
-      .replace(/<!--[\s\S]*?-->/g, "")
-      .replace(/^#{1,6}\s+/gm, "")
-      .replace(/(\*\*|__)(.+?)\1/g, "$2")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim()
-  }
+  function plainBody(text) { return Inbox.plainText(text) }
 
   Rectangle {
     visible: !pane.solo
@@ -420,17 +380,35 @@ Item {
         id: bodyRepeater
         model: pane.full ? pane.bodyBlocks : []
 
-        Text {
+        // A list item is its marker and a wrapping column beside it, so its
+        // second line keeps the item's indent.
+        Row {
           required property var modelData
           width: content.width
           topPadding: modelData.heading ? Style.space(4) : 0
-          text: modelData.text
-          textFormat: Text.PlainText
-          color: pane.inbox.foreground
-          font.family: pane.inbox.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.bold: modelData.heading
-          wrapMode: Text.Wrap
+          leftPadding: modelData.indent * Style.space(14)
+          spacing: Style.space(6)
+
+          Text {
+            id: bulletText
+            visible: modelData.bullet !== ""
+            text: modelData.bullet
+            textFormat: Text.PlainText
+            color: pane.inbox.dim
+            font.family: pane.inbox.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            width: parent.width - parent.leftPadding - (bulletText.visible ? bulletText.width + parent.spacing : 0)
+            text: modelData.text
+            textFormat: Text.PlainText
+            color: pane.inbox.foreground
+            font.family: pane.inbox.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: modelData.heading
+            wrapMode: Text.Wrap
+          }
         }
       }
 
@@ -805,7 +783,8 @@ Item {
 
       Button {
         visible: pane.isPr
-        enabled: pane.full && pane.inbox.mergeBlock === ""
+        // Clickable when blocked too: a click shows why, like `m` does.
+        enabled: pane.full
         text: "Merge"
         tooltipText: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m"
         bordered: true

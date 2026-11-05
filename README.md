@@ -52,19 +52,22 @@ switches to the urgent color while unread notifications or mentions wait.
 PR or issue under the cursor, and the preview follows the cursor. It shows
 the state, author, branches and size, checks, review decision, whether the
 PR can merge (or why not), labels, the top of the description, and the
-latest three comments, fetched on demand through `gh` and cached for a
-minute.
+latest three comments, fetched on demand through `gh`. A preview seen in
+the last five minutes shows at once and is refreshed in the background
+when it is older than one.
 
 From the preview, `Enter` opens the page, `c` opens a comment box that posts
 with `Ctrl+Enter`, and `m` opens a merge confirmation that merges only on a
-fresh `Enter` or its Confirm button (never a held key or Space). Merge is offered only when GitHub reports the PR
-mergeable, uses a method the repo allows, and is pinned to the head commit
-the preview showed, and the base branch is checked again right before
-merging, so a PR pushed to or retargeted in the meantime does not merge.
+fresh `Enter` or its Confirm button (never a held key or Space). The
+confirmation opens only when GitHub reports the PR mergeable and you may
+merge (otherwise the Merge button and `m` say why), uses a method the repo
+allows, and is pinned to the head commit the preview showed. The base
+branch is checked again right before merging, so a PR pushed to or
+retargeted in the meantime does not merge.
 GitHub's merge API cannot pin the base itself, so a retarget landing between
 that check and the merge (a window as long as one round trip to GitHub) is
-the one case left, as on the web. It merges now or not at all: a base that requires a merge queue
-fails instead of queueing or turning on auto-merge.
+the one case left, as on the web. It merges now or not at all: a base that
+requires a merge queue fails instead of queueing or turning on auto-merge.
 
 IPC works from anywhere, always targeting the focused monitor's instance:
 

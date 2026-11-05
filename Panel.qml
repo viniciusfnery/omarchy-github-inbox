@@ -368,6 +368,11 @@ Panel {
   property bool keysOpen: false
   // Bumped when the pointer rests on a row, so the row that was open folds.
   property int pointerRestSerial: 0
+  property bool pointerFollowPending: false
+  onPointerRestSerialChanged: if (pointerFollowPending) {
+    pointerFollowPending = false
+    syncPreviewToCursor()
+  }
   signal lingerOpenRow()
   // The legend borrows the list's scroll, so give it back on every way out.
   property real keysScrollY: 0
@@ -646,6 +651,10 @@ Panel {
     // only the fetch waits for the cursor to settle; a row with nothing to
     // preview empties it, so Enter cannot open the previous PR.
     if (holdAfterAction) return
+    // The pointer crossing rows on its way to the pane's buttons must not
+    // swap the preview: it follows once the pointer rests on a row (the
+    // row's 350 ms rest), keys follow at once.
+    if (previewOpen && !cursorFromKeyboard) { pointerFollowPending = true; return }
     if (previewOpen) syncPreviewToCursor()
     else prefetchTimer.restart()
   }
@@ -853,6 +862,7 @@ Panel {
   }
 
   function startComment() {
+    if (!previewOpen) return
     if (previewMode === "comment") { previewPane.focusComment(); return }
     if (!previewData || actionBusy) return
     previewDebounce.stop()
@@ -865,7 +875,7 @@ Panel {
   property var mergeTarget: null
 
   function startMerge() {
-    if (!previewData || actionBusy || previewMode !== "") return
+    if (!previewOpen || !previewData || actionBusy || previewMode !== "") return
     if (mergeBlock !== "") { notice(mergeBlock, false); return }
     previewDebounce.stop()
     mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
@@ -888,6 +898,7 @@ Panel {
   }
 
   function sendComment(text) {
+    if (!previewOpen || previewMode !== "comment") return
     if (actionBusy || String(text || "").trim() === "" || previewUrl === "") return
     actionBusy = true
     actionProcess.kind = "comment"
@@ -991,7 +1002,7 @@ Panel {
     if (previewOpen && previewMode === "merge")
       return "↵ confirm merge" + (previewData && previewData.mergeMethods && previewData.mergeMethods.length > 1 ? " · h/l method" : "") + " · Esc cancel"
     if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
-    if (previewOpen) return "j/k follow · J/K scroll · ↵ open · c comment" + (previewData && previewData.kind === "pr" ? " · m merge" : "")
+    if (previewOpen) return "j/k next item · J/K scroll · ↵ open · c comment" + (previewData && previewData.kind === "pr" && mergeBlock === "" ? " · m merge" : "")
       + (paneSolo ? " · p back to the list" : " · p close")
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
@@ -1622,7 +1633,10 @@ Panel {
       // The list's width with the pane closed, kept while it is open so
       // the list does not change size or move as the panel widens.
 
+      // With the comment box open, every key the list catches goes back to
+      // the box and does nothing else (see textKey).
       onMoveRequested: function(dx, dy) {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
         // Choosing how to merge: left and right pick the method, nothing moves.
         if (root.previewOpen && root.previewMode === "merge") {
           if (dx !== 0) root.cycleMergeMethod(dx)
@@ -1646,6 +1660,7 @@ Panel {
         if (dy !== 0) root.moveCursor(dy)
       }
       onActivateRequested: {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
         if (root.keysOpen) return
         // Space or a repeated Enter must not merge: the strip ignores this
         // generic signal, and a fresh Enter reaches it through the Shortcut.
@@ -1654,7 +1669,10 @@ Panel {
         else if (root.previewOpen && root.previewUrl !== "") root.openPreviewed()
         else root.activateCursor()
       }
-      onDeleteRequested: if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
+      onDeleteRequested: {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        if (!root.settingsOpen && !root.keysOpen) root.dismissCursor()
+      }
       onCloseRequested: {
         // A running comment or merge keeps its strip and pane on screen.
         if (root.actionBusy) return
@@ -1665,7 +1683,10 @@ Panel {
         else if (root.query !== "" || root.searchOpen) root.closeSearch()
         else root.close()
       }
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTabRequested: function(direction) {
+        if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        root.switchPanel(direction)
+      }
       onTextKey: function(t) {
         // u, s and / still work over the legend: undo must never be blocked,
         // and the other two leave the legend for their view.
@@ -1737,6 +1758,8 @@ Panel {
         anchors.top: parent.top
         anchors.bottom: panelFlick.bottom
         visible: opacity > 0.01
+        // Fading out after p: drawn, but nothing in it can be clicked.
+        enabled: root.previewOpen
         opacity: root.previewOpen ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 160 } }
       }
