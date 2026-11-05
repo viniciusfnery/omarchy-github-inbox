@@ -255,6 +255,12 @@ t("quotes: a closing tag hidden in an HTML comment still counts as the last clos
   assert.ok(b.filter(x => /FAKE/.test(x.text)).every(x => x.quote), JSON.stringify(b))
 })
 
+t("comments: emoji codes read as emoji, and tags or links cut by the 400-character limit go", () => {
+  assert.strictEqual(I.plainText(":white_check_mark: All lines covered :x: one :warning:"), "✅ All lines covered ❌ one ⚠️")
+  assert.strictEqual(I.plainText("Summary\n<source media=\"(prefers-color-scheme: dark)\" srcset=\"https://storage.googleapis.com/coderab…"), "Summary")
+  assert.strictEqual(I.plainText("Comparing base ([2f4d84f](https://app.codecov.io/gh/ut-issl/cosmica/commit…"), "Comparing base (2f4d84f")
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

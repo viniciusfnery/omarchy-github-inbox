@@ -4,6 +4,7 @@
 #   preview.sh view <url>
 #   preview.sh comment <url>                       (comment text on stdin)
 #   preview.sh merge <pr url> <squash|merge|rebase> <head sha> <base branch>
+#   preview.sh ready <pr url>                      (a draft, ready for review)
 # Output is one JSON object, {error: "..."} on failure. Every entry point
 # checks the URL first, so only a github.com PR or issue ever reaches gh,
 # never another host or something gh would read as a flag.
@@ -36,7 +37,7 @@ view)
         number title state isDraft url createdAt body additions deletions changedFiles
         baseRefName headRefName headRefOid reviewDecision mergeable mergeStateStatus
         author { login } labels(first: 10) { nodes { name } }
-        comments(last: 3) { totalCount nodes { author { login } createdAt body } }
+        comments(last: 3) { totalCount nodes { author { login __typename } createdAt body } }
         commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { totalCount
           nodes { __typename ... on CheckRun { status conclusion } ... on StatusContext { state } } } } } } } } } }'
   else
@@ -44,7 +45,7 @@ view)
       item: issue(number: $number) {
         number title state stateReason url createdAt body author { login }
         labels(first: 10) { nodes { name } } assignees(first: 10) { nodes { login } }
-        comments(last: 3) { totalCount nodes { author { login } createdAt body } } } } }'
+        comments(last: 3) { totalCount nodes { author { login __typename } createdAt body } } } } }'
   fi
   # Owner and repo as strings (-f): -F would turn a numeric name into an int.
   errfile=$(mktemp) || fail "No temporary file"
@@ -76,7 +77,8 @@ view)
       createdAt: ($p.createdAt // ""),
       labels: [($p.labels.nodes // [])[] | .name | cut(50)][0:10],
       body: ($p.body | cut(1200)),
-      comments: [($p.comments.nodes // [])[] | {author: (.author | login), createdAt: (.createdAt // ""), body: (.body | cut(400))}],
+      comments: [($p.comments.nodes // [])[] | {author: (.author | login), createdAt: (.createdAt // ""), body: (.body | cut(400)),
+        bot: (((.author // {}).__typename // "") == "Bot" or ((.author | login) | endswith("[bot]")))}],
       commentTotal: (($p.comments.totalCount) // 0)
     } + if $kind == "pr" then {
       reviewDecision: ($p.reviewDecision // ""),
@@ -144,6 +146,12 @@ merge)
   [[ $(jq -r '.merged // false' <<<"$out" 2>/dev/null) == true ]] || fail "GitHub did not merge it"
   # The inbox changed: drop its 60s cache so the next refresh asks GitHub.
   rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-github-tasks.json"
+  echo '{"ok": true}'
+  ;;
+ready)
+  # Reversible (a PR can go back to draft), so one confirmed step is enough.
+  [[ $kind == pr ]] || fail "Only pull requests have drafts"
+  err=$(gh pr ready "$url" 2>&1 >/dev/null) || fail "GitHub refused: ${err%%$'\n'*}"
   echo '{"ok": true}'
   ;;
 *)

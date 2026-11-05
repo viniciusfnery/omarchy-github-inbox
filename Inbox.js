@@ -200,8 +200,25 @@ function releasesHold(cause) {
 
 // Markdown shown as plain text (never rendered, so nothing in it can
 // become markup): what GitHub bodies are full of reads as words.
+// The emoji codes bots and people type most, as the emoji GitHub shows.
+var emojiCodes = {
+  white_check_mark: "✅", heavy_check_mark: "✔️", x: "❌", warning: "⚠️", rocket: "🚀",
+  tada: "🎉", bug: "🐛", bulb: "💡", memo: "📝", eyes: "👀", fire: "🔥", sparkles: "✨",
+  "+1": "👍", "-1": "👎", thumbsup: "👍", thumbsdown: "👎", heart: "❤️", pray: "🙏",
+  exclamation: "❗", question: "❓", information_source: "ℹ️", arrow_right: "→", wrench: "🔧",
+  hammer: "🔨", lock: "🔒", zap: "⚡", recycle: "♻️", broom: "🧹", construction: "🚧",
+  test_tube: "🧪", chart_with_upwards_trend: "📈", chart_with_downwards_trend: "📉",
+  small_red_triangle_down: "🔻", small_red_triangle: "🔺", heavy_minus_sign: "➖", rabbit: "🐇"
+}
+
 function cleanLine(line) {
   return String(line)
+    // What the 400- and 1200-character cuts leave half done goes first: an
+    // unclosed tag or image disappears, an unclosed link keeps its text.
+    .replace(/!\[[^\]]*\]\([^)]*$/, "[image]")
+    .replace(/<[A-Za-z][^>]*$/, "")
+    .replace(/\[([^\]]*)\]\([^)]*$/, "$1")
+    .replace(/:([a-z0-9_+-]+):/g, function(m, code) { return Object.prototype.hasOwnProperty.call(emojiCodes, code) ? emojiCodes[code] : m })
     .replace(/!\[[^\]]*\]\([^)]*\)/g, "[image]")
     .replace(/<img[^>]*>/gi, "[image]")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")

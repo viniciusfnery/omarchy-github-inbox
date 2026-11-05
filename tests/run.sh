@@ -249,7 +249,7 @@ pr_fixture() { # [body padding bytes]
         {__typename: "CheckRun", status: "COMPLETED", conclusion: "FAILURE"},
         {__typename: "CheckRun", status: "IN_PROGRESS", conclusion: null},
         {__typename: "StatusContext", state: "SUCCESS"}]}}}}]},
-      comments: {totalCount: 40, nodes: [range(3; 6) | {author: {login: ("u" + tostring)}, createdAt: "2026-01-02T00:00:00Z",
+      comments: {totalCount: 40, nodes: [range(3; 6) | {author: {login: ("u" + tostring), __typename: (if . == 4 then "Bot" else "User" end)}, createdAt: "2026-01-02T00:00:00Z",
         body: ("comment " + tostring + " " + $long)}]}}}}}' >"$FAKE_GH_FIXTURES/graphql.json"
 }
 
@@ -265,6 +265,8 @@ t "preview: body and comments are cut to size, the last 3 comments in order" \
 t "preview: one GraphQL call, owner and repo as strings" \
   "$([[ $(grep -c '^api graphql' "$FAKE_GH_LOG") -eq 1 ]] && grep -q -- '-f owner=acme -f repo=repo1 -F number=7' "$FAKE_GH_LOG" && echo true || echo false)"
 t "preview: someone with write access can merge" "$(jqt '.canMerge == true' "$out")"
+t "preview: comment authors carry whether they are bots" \
+  "$(jqt '[.comments[].bot] == [false, true, false]' "$out")"
 t "preview: the comment total comes with the last three" "$(jqt '.commentTotal == 40' "$out")"
 
 # A closed issue says how it closed: completed and not planned read differently.
@@ -381,6 +383,16 @@ echo '{"baseRefName": "main", "headRefOid": "abc123", "state": "OPEN"}' >"$FAKE_
 echo '{"cached": true}' >"$CACHE"
 bash "$PREVIEW" merge "https://github.com/acme/repo1/pull/7" squash abc123 main >/dev/null
 t "preview: a merge drops the inbox cache" "$([[ ! -e $CACHE ]] && echo true || echo false)"
+
+# Ready for review: only for a PR, through gh pr ready.
+fresh_env
+out=$(bash "$PREVIEW" ready "https://github.com/acme/repo1/pull/7")
+out2=$(bash "$PREVIEW" ready "https://github.com/acme/repo1/issues/7")
+verdicts="$(jqt '.ok == true' "$out") $(jqt '.error | length > 0' "$out2")"
+t "preview: ready marks a draft PR ready for review, never an issue" \
+  "$([[ $verdicts == "true true" ]] && echo true || echo false)"
+t "preview: ready goes through gh pr ready" \
+  "$([[ $(grep -c '^pr ready https://github.com/acme/repo1/pull/7$' "$FAKE_GH_LOG") -eq 1 ]] && echo true || echo false)"
 
 # A base that requires a merge queue must fail, never queue or turn on
 # auto-merge behind a "Merged".

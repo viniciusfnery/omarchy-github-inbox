@@ -619,6 +619,20 @@ Panel {
     syncPreviewToCursor()
   }
 
+  function previewFirst(nth) {
+    var seen = 0
+    for (var r = 0; r < rowCount; r++) {
+      var at = rowAt(r)
+      if (at && at.item && previewableUrl(at.item.url) && ++seen >= (nth || 1)) {
+        cursorFromKeyboard = true
+        cursorActive = true
+        cursor = r
+        openPreview()
+        return
+      }
+    }
+  }
+
   function togglePreview() {
     if (actionBusy) return
     if (previewOpen) closePreview()
@@ -856,7 +870,7 @@ Panel {
     if (!d || d.kind !== "pr") return "Only pull requests merge"
     if (d.state === "MERGED") return "Already merged"
     if (d.state === "CLOSED") return "Closed"
-    if (d.state === "DRAFT") return "Draft: mark it ready for review first"
+    if (d.state === "DRAFT") return "Draft: m marks it ready for review"
     if (d.canMerge === false) return "You do not have permission to merge here"
     if (d.mergeable === "CONFLICTING") return "Has conflicts with " + d.base
     if (d.mergeable !== "MERGEABLE") return "GitHub is still checking mergeability"
@@ -880,8 +894,21 @@ Panel {
   // head commit shown. A refresh landing meanwhile cannot change the target.
   property var mergeTarget: null
 
+  // `m` moves a PR forward: on a draft that means ready for review (the
+  // same second step as a merge), otherwise merge.
+  readonly property bool canMarkReady: !!previewData && previewData.kind === "pr" && previewData.state === "DRAFT"
+    && (previewData.canMerge === true || String(previewData.author) === String(feed.user || ""))
+
   function startMerge() {
     if (!previewOpen || !previewData || actionBusy || previewMode !== "") return
+    if (previewData.kind === "pr" && previewData.state === "DRAFT") {
+      if (!canMarkReady) { notice("Only the author or someone with write access can mark it ready", false, true); return }
+      previewDebounce.stop()
+      mergeTarget = { url: previewUrl, number: previewData.number }
+      previewNotice = ""
+      previewMode = "ready"
+      return
+    }
     if (mergeBlock !== "") { notice(mergeBlock, false, true); return }
     previewDebounce.stop()
     mergeTarget = { url: previewUrl, sha: String(previewData.headSha), base: String(previewData.base), number: previewData.number }
@@ -915,6 +942,17 @@ Panel {
     actionProcess.payload = String(text)
     actionProcess.stdinEnabled = true
     actionProcess.command = ["bash", previewPath, "comment", previewUrl]
+    actionProcess.running = true
+  }
+
+  function confirmReady() {
+    if (actionBusy || previewMode !== "ready" || !mergeTarget || mergeTarget.url !== previewUrl) return
+    actionBusy = true
+    actionProcess.kind = "ready"
+    actionProcess.target = mergeTarget.url
+    actionProcess.payload = ""
+    actionProcess.stdinEnabled = false
+    actionProcess.command = ["bash", previewPath, "ready", mergeTarget.url]
     actionProcess.running = true
   }
 
@@ -960,7 +998,8 @@ Panel {
     if (kind === "comment") commentPosted(actionProcess.target)
     holdAfterAction = true
     previewMode = ""
-    if (previewUrl === actionProcess.target) notice(kind === "merge" ? "Merged" : "Comment posted", false)
+    if (previewUrl === actionProcess.target)
+      notice(kind === "merge" ? "Merged" : (kind === "ready" ? "Marked ready for review" : "Comment posted"), false)
     // Show what GitHub now says, and let the list catch up with a merge.
     // Any answer to a request started before now is out of date.
     var stale = Inbox.copy(invalidatedAt)
@@ -974,7 +1013,7 @@ Panel {
       reloadPending = true
       loadPreview()
     }
-    if (kind === "merge") refreshNow()
+    if (kind === "merge" || kind === "ready") refreshNow()
   }
 
   property var invalidatedAt: Inbox.dict()
@@ -1007,11 +1046,13 @@ Panel {
                        : " · u or click to undo (" + left + "s)")
     }
     if (keysOpen) return "? or Esc back"
-    if (actionBusy) return actionProcess.kind === "merge" ? "Merging…" : "Posting the comment…"
+    if (actionBusy) return actionProcess.kind === "merge" ? "Merging…" : (actionProcess.kind === "ready" ? "Marking it ready…" : "Posting the comment…")
+    if (previewOpen && previewMode === "ready") return "↵ mark ready for review · Esc cancel"
     if (previewOpen && previewMode === "merge")
       return "↵ confirm merge" + (previewData && previewData.mergeMethods && previewData.mergeMethods.length > 1 ? " · h/l method" : "") + " · Esc cancel"
     if (previewOpen && previewMode === "comment") return "Ctrl+↵ send · Esc cancel"
-    if (previewOpen) return "j/k next item · J/K scroll · ↵ open · c comment" + (previewData && previewData.kind === "pr" && mergeBlock === "" ? " · m merge" : "")
+    if (previewOpen) return "j/k next item · J/K scroll · ↵ open · c comment"
+      + (canMarkReady ? " · m ready for review" : (previewData && previewData.kind === "pr" && mergeBlock === "" ? " · m merge" : ""))
       + (paneSolo ? " · p back to the list" : " · p close")
     if (settingsOpen) {
       var srow = settingsRow(settingsCursor)
@@ -1223,6 +1264,9 @@ Panel {
 
   function ensureVisible(rowItem) {
     if (!panelFlick || !rowItem) return
+    // While the panel's height is still animating open the view can be
+    // shorter than the row; scrolling then would push the header away.
+    if (panelFlick.height < rowItem.height + Style.space(44)) return
     var y = rowItem.mapToItem(panelFlick.contentItem, 0, 0).y
     // Top padding keeps the section header in view.
     var padTop = Style.space(36)
@@ -1237,6 +1281,16 @@ Panel {
   // Find lives in the inbox, so it leaves settings and scrolls to the field.
   function scrollPreview(direction) { previewPane.scrollBy(direction) }
 
+  // Qt's default turns touchpad input into coarse steps that feel stiff.
+  // Pixel deltas (touchpads) move the content exactly with the fingers;
+  // angle deltas (wheel notches) move three lines each.
+  function wheelScroll(flick, event) {
+    var maxY = Math.max(0, flick.contentHeight - flick.height)
+    var dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y : event.angleDelta.y / 120 * Style.space(54)
+    flick.contentY = clamp(flick.contentY - dy, 0, maxY)
+    event.accepted = true
+  }
+
   // Open from the pane does what opening the row does (a notification is
   // dismissed, a mention marked seen) when the pane shows the cursor's row.
   function openPreviewed() {
@@ -1247,7 +1301,7 @@ Panel {
 
   function openSearch() {
     releaseHold("search")
-    if (previewMode === "merge" && !actionBusy) previewMode = ""
+    if ((previewMode === "merge" || previewMode === "ready") && !actionBusy) previewMode = ""
     // Single-column: the search field lives in the list, so show the list.
     if (paneSolo && !actionBusy) closePreview()
     keysOpen = false
@@ -1579,6 +1633,20 @@ Panel {
       root.routedInstance().toggleFocusMode()
       return root.routedInstance().focusMode ? "on" : "off"
     }
+    // Open the panel straight into the preview of the nth PR or issue
+    // (1 when n is empty), for a keybinding.
+    function preview(n: string): string {
+      var target = root.routedInstance()
+      target.open()
+      var index = Math.max(1, parseInt(n, 10) || 1)
+      Qt.callLater(function() { target.previewFirst(index) })
+      return "ok"
+    }
+    // Scroll the open preview by n half pages (negative goes up).
+    function scroll(n: string): string {
+      root.routedInstance().scrollPreview(parseInt(n, 10) || 1)
+      return "ok"
+    }
     function find(): string {
       var target = root.routedInstance()
       target.open()
@@ -1655,6 +1723,7 @@ Panel {
       // the box and does nothing else (see textKey).
       onMoveRequested: function(dx, dy) {
         if (root.previewOpen && root.previewMode === "comment") { previewPane.focusComment(); return }
+        if (root.previewOpen && root.previewMode === "ready") return
         // Choosing how to merge: left and right pick the method, nothing moves.
         if (root.previewOpen && root.previewMode === "merge") {
           if (dx !== 0) root.cycleMergeMethod(dx)
@@ -1682,7 +1751,7 @@ Panel {
         if (root.keysOpen) return
         // Space or a repeated Enter must not merge: the strip ignores this
         // generic signal, and a fresh Enter reaches it through the Shortcut.
-        if (root.previewOpen && root.previewMode === "merge") return
+        if (root.previewOpen && (root.previewMode === "merge" || root.previewMode === "ready")) return
         if (root.settingsOpen) root.activateSettings()
         else if (root.previewOpen && root.previewUrl !== "") root.openPreviewed()
         else root.activateCursor()
@@ -1710,7 +1779,7 @@ Panel {
         // and the other two leave the legend for their view.
         // While the merge strip is open only Enter confirms: a held `m`
         // must never open and confirm in one go.
-        if (root.previewOpen && root.previewMode === "merge") return
+        if (root.previewOpen && (root.previewMode === "merge" || root.previewMode === "ready")) return
         // With the comment box open, a key that reached the list (focus lost
         // after a failed post, say) goes back to the box and does nothing
         // else: a word typed there must never open or confirm a merge.
@@ -1750,8 +1819,8 @@ Panel {
       Shortcut {
         sequences: ["Return", "Enter"]
         autoRepeat: false
-        enabled: root.previewOpen && root.previewMode === "merge" && !searchField.activeFocus
-        onActivated: root.confirmMerge()
+        enabled: root.previewOpen && (root.previewMode === "merge" || root.previewMode === "ready") && !searchField.activeFocus
+        onActivated: root.previewMode === "ready" ? root.confirmReady() : root.confirmMerge()
       }
       Shortcut {
         sequences: ["Shift+J", StandardKey.MoveToNextPage]
@@ -1845,6 +1914,12 @@ Panel {
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        // A touchpad scrolls 1:1 with the fingers, a wheel notch glides.
+        WheelHandler {
+          acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+          onWheel: function(event) { root.wheelScroll(panelFlick, event) }
+        }
 
         Column {
           id: column

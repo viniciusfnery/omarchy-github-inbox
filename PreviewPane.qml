@@ -202,6 +202,13 @@ Item {
     clip: true
     boundsBehavior: Flickable.StopAtBounds
     interactive: contentHeight > height
+    WheelHandler {
+      acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+      onWheel: function(event) {
+        scrollGlide.stop()
+        pane.inbox.wheelScroll(flick, event)
+      }
+    }
     // Always drawn when there is more to read, so the pane says it scrolls.
     ScrollBar.vertical: ScrollBar { policy: pane.maxScroll > 0 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
 
@@ -450,33 +457,86 @@ Item {
       Repeater {
         model: pane.full ? pane.d.comments : []
 
-        Column {
+        // One card per comment, so where one ends and the next begins is
+        // never a guess. Bot comments (coverage, review bots) say so and
+        // fold to two dim lines; people's comments get five.
+        BorderSurface {
+          id: card
           required property var modelData
+          readonly property bool bot: modelData.bot === true
           width: content.width
-          spacing: Style.space(2)
+          implicitHeight: commentColumn.implicitHeight + Style.space(16)
+          radius: Style.cornerRadius
+          color: pane.inbox.alpha(pane.inbox.foreground, bot ? 0.02 : 0.045)
+          borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, 0.1), 1)
 
-          Text {
-            width: parent.width
-            text: "@" + modelData.author + " · " + pane.ago(modelData.createdAt)
-            textFormat: Text.PlainText
-            color: pane.inbox.dim
-            font.family: pane.inbox.fontFamily
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            elide: Text.ElideRight
-          }
+          Column {
+            id: commentColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(8)
+            spacing: Style.space(4)
 
-          Text {
-            width: parent.width
-            readonly property string clean: pane.plainBody(modelData.body)
-            text: clean !== "" ? clean : "Quoted an earlier comment"
-            textFormat: Text.PlainText
-            color: clean !== "" ? pane.inbox.foreground : pane.inbox.dim
-            font.family: pane.inbox.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.Wrap
-            maximumLineCount: 5
-            elide: Text.ElideRight
+            Row {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                id: authorText
+                text: "@" + modelData.author.replace(/\[bot\]$/, "")
+                textFormat: Text.PlainText
+                color: card.bot ? pane.inbox.dim : pane.inbox.foreground
+                font.family: pane.inbox.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                elide: Text.ElideRight
+                width: Math.min(implicitWidth, parent.width - whenText.implicitWidth - botTag.width - Style.space(12))
+              }
+
+              BorderSurface {
+                id: botTag
+                visible: card.bot
+                width: visible ? botLabel.implicitWidth + Style.space(8) : 0
+                height: botLabel.implicitHeight + Style.space(2)
+                anchors.verticalCenter: authorText.verticalCenter
+                radius: Style.cornerRadius
+                color: "transparent"
+                borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, 0.25), 1)
+
+                Text {
+                  id: botLabel
+                  anchors.centerIn: parent
+                  text: "bot"
+                  textFormat: Text.PlainText
+                  color: pane.inbox.dim
+                  font.family: pane.inbox.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Text {
+                id: whenText
+                text: pane.ago(modelData.createdAt)
+                textFormat: Text.PlainText
+                color: pane.inbox.dim
+                font.family: pane.inbox.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            Text {
+              width: parent.width
+              readonly property string clean: pane.plainBody(modelData.body)
+              text: clean !== "" ? clean : "Quoted an earlier comment"
+              textFormat: Text.PlainText
+              color: clean !== "" && !card.bot ? pane.inbox.foreground : pane.inbox.dim
+              font.family: pane.inbox.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.Wrap
+              maximumLineCount: card.bot ? 2 : 5
+              elide: Text.ElideRight
+            }
           }
         }
       }
@@ -680,6 +740,74 @@ Item {
       }
     }
 
+    // Ready for review: the same second step, for a draft.
+    BorderSurface {
+      visible: pane.inbox.previewMode === "ready"
+      width: parent.width
+      implicitHeight: readyColumn.implicitHeight + Style.space(20)
+      radius: Style.cornerRadius
+      color: pane.inbox.alpha(pane.inbox.foreground, 0.05)
+      borderSpec: Border.flat(pane.inbox.alpha(pane.inbox.foreground, 0.35), 1)
+
+      Column {
+        id: readyColumn
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.margins: Style.space(10)
+        spacing: Style.space(8)
+
+        Text {
+          width: parent.width
+          text: pane.inbox.mergeTarget ? "Mark #" + pane.inbox.mergeTarget.number + " ready for review?" : ""
+          textFormat: Text.PlainText
+          color: pane.inbox.foreground
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: true
+          wrapMode: Text.Wrap
+        }
+
+        Text {
+          width: parent.width
+          text: "Requested reviewers are notified. It can go back to draft on GitHub."
+          textFormat: Text.PlainText
+          color: pane.inbox.dim
+          font.family: pane.inbox.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+
+        Flow {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Button {
+            text: pane.inbox.actionBusy ? "Marking…" : "Mark ready"
+            tooltipText: "Enter"
+            focusable: false
+            bordered: true
+            enabled: !pane.inbox.actionBusy
+            foreground: pane.inbox.foreground
+            fontFamily: pane.inbox.fontFamily
+            fontSize: Style.font.bodySmall
+            onClicked: pane.inbox.confirmReady()
+          }
+
+          Button {
+            text: "Cancel"
+            tooltipText: "Esc"
+            bordered: true
+            enabled: !pane.inbox.actionBusy
+            foreground: pane.inbox.foreground
+            fontFamily: pane.inbox.fontFamily
+            fontSize: Style.font.bodySmall
+            onClicked: pane.inbox.previewMode = ""
+          }
+        }
+      }
+    }
+
     // Merge confirmation: the second, explicit step.
     BorderSurface {
       visible: pane.inbox.previewMode === "merge"
@@ -803,12 +931,14 @@ Item {
         // Hidden when it can never merge here (merged, closed, no permission);
         // shown dim for a block that can pass (draft, conflicts, checking),
         // and clickable then too: a click says why, like `m` does.
-        visible: pane.isPr && pane.full && pane.d.state !== "MERGED" && pane.d.state !== "CLOSED" && pane.d.canMerge !== false
+        visible: pane.isPr && pane.full && pane.d.state !== "MERGED" && pane.d.state !== "CLOSED"
+          && (pane.d.canMerge !== false || pane.inbox.canMarkReady)
         enabled: pane.full
-        text: "Merge"
-        tooltipText: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m"
+        // On a draft this slot is the step that comes first: ready for review.
+        text: pane.full && pane.d.state === "DRAFT" ? "Ready for review" : "Merge"
+        tooltipText: pane.full && pane.d.state === "DRAFT" ? "m" : (pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m")
         bordered: true
-        foreground: pane.inbox.mergeBlock === "" ? pane.inbox.foreground : pane.inbox.dim
+        foreground: pane.inbox.mergeBlock === "" || pane.inbox.canMarkReady ? pane.inbox.foreground : pane.inbox.dim
         fontFamily: pane.inbox.fontFamily
         fontSize: Style.font.bodySmall
         onClicked: pane.inbox.startMerge()

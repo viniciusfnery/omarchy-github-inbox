@@ -32,7 +32,7 @@ if [[ ${1:-} == pr || ${1:-} == issue ]]; then
     fi
     exit 0
     ;;
-  merge) exit 0 ;;
+  merge | ready) exit 0 ;;
   *) exit 1 ;;
   esac
   exit 0
