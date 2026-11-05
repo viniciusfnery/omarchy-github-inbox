@@ -1291,7 +1291,6 @@ Panel {
   // Find lives in the inbox, so it leaves settings and scrolls to the field.
   function scrollPreview(direction) { previewPane.scrollBy(direction) }
 
-  // Qt's default turns touchpad input into coarse steps that feel stiff.
   // Open from the pane does what opening the row does (a notification is
   // dismissed, a mention marked seen) when the pane shows the cursor's row.
   function openPreviewed() {

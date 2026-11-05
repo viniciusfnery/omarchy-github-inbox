@@ -245,8 +245,7 @@ function cleanLine(line) {
 // as "a · b · c", and quotes. Markdown and the HTML bots write instead
 // (Dependabot's <blockquote>, <h2> and <li>) are read the same way. Code
 // fences keep their content and lose the fence. Input is cut to 4000
-// characters first: the regexes are quadratic on unclosed brackets, and
-// 200 KB of them once took 23 s.
+// characters first: the regexes are quadratic on unclosed brackets.
 function bodyBlocks(text, maxBlocks) {
   var max = maxBlocks || 12
   var source = String(text || "")
@@ -312,7 +311,6 @@ function bodyBlocks(text, maxBlocks) {
     var htmlHeading = /^\s*<h[1-6]\b[^>]*>(.*)<\/h[1-6]>\s*$/i.exec(raw)
     var htmlItem = /^\s*<li\b[^>]*>(.*?)(<\/li>)?\s*$/i.exec(raw)
     // A table row the 1200-character cut ended early has no closing pipe.
-    // The row above the |---| line is the header: bold, as column names.
     var alert = /^\s*>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i.exec(raw)
     if (alert) {
       flush()

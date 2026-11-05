@@ -82,13 +82,9 @@ Item {
     return String(d.state).charAt(0) + String(d.state).slice(1).toLowerCase()
   }
 
-  // Bodies are markdown, shown as plain text (never rendered, so nothing in
-  // them can become markup): HTML comments, heading marks, emphasis marks
-  // and runs of blank lines go.
   // The description as blocks (Inbox.bodyBlocks, tested): headings,
   // paragraphs, list items with their depth, table rows.
   readonly property var bodyBlocks: full ? Inbox.bodyBlocks(d.body, 12) : []
-  // True when the 12-block cap left something out.
   TextMetrics {
     id: markerMetrics
     text: "00."
@@ -96,6 +92,7 @@ Item {
     font.pixelSize: Style.font.bodySmall
   }
 
+  // True when the 12-block cap left something out.
   readonly property bool bodyCapped: full && Inbox.bodyBlocks(d.body, 13).length > 12
 
   function plainBody(text) { return Inbox.plainText(text) }
