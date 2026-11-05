@@ -378,11 +378,22 @@ Item {
         // A list item is its marker and a wrapping column beside it, so its
         // second line keeps the item's indent.
         Row {
+          id: blockRow
           required property var modelData
+          readonly property bool quote: modelData.quote === true
           width: content.width
           topPadding: modelData.heading ? Style.space(4) : 0
-          leftPadding: modelData.indent * Style.space(14)
+          // A quote sits behind a bar, dim, so it never reads as the author's.
+          leftPadding: quote ? Style.space(10) : modelData.indent * Style.space(14)
           spacing: Style.space(6)
+
+          Rectangle {
+            visible: blockRow.quote
+            x: 0
+            width: 2
+            height: quoteText.implicitHeight
+            color: pane.inbox.alpha(pane.inbox.foreground, 0.3)
+          }
 
           Text {
             id: bulletText
@@ -398,10 +409,12 @@ Item {
           }
 
           Text {
+            id: quoteText
             width: parent.width - parent.leftPadding - (bulletText.visible ? bulletText.width + parent.spacing : 0)
+              - (blockRow.quote ? 2 + parent.spacing : 0)
             text: modelData.text
             textFormat: Text.PlainText
-            color: pane.inbox.foreground
+            color: blockRow.quote ? pane.inbox.dim : pane.inbox.foreground
             font.family: pane.inbox.fontFamily
             font.pixelSize: Style.font.bodySmall
             font.bold: modelData.heading
@@ -534,10 +547,15 @@ Item {
       width: parent.width
       spacing: Style.space(8)
 
+      // Says why (gh's reason, named by preview.sh), and steps aside while
+      // a retry runs.
       Text {
+        visible: !pane.inbox.previewLoading
         width: Math.min(implicitWidth, parent.width)
         wrapMode: Text.Wrap
-        text: pane.inbox.previewStale ? "Could not refresh, this may be out of date" : "Could not load this preview"
+        text: pane.inbox.previewStale
+          ? "Could not refresh (" + pane.inbox.previewError + "), this may be out of date"
+          : "Could not load: " + pane.inbox.previewError
         textFormat: Text.PlainText
         color: pane.inbox.urgent
         font.family: pane.inbox.fontFamily
@@ -545,8 +563,9 @@ Item {
       }
 
       Button {
-        text: "Retry"
+        text: pane.inbox.previewLoading ? "Retrying…" : "Retry"
         tooltipText: "r"
+        enabled: !pane.inbox.previewLoading
         bordered: true
         foreground: pane.inbox.foreground
         fontFamily: pane.inbox.fontFamily
@@ -784,7 +803,7 @@ Item {
         // Hidden when it can never merge here (merged, closed, no permission);
         // shown dim for a block that can pass (draft, conflicts, checking),
         // and clickable then too: a click says why, like `m` does.
-        visible: pane.isPr && !(pane.full && (pane.d.state === "MERGED" || pane.d.state === "CLOSED" || pane.d.canMerge === false))
+        visible: pane.isPr && pane.full && pane.d.state !== "MERGED" && pane.d.state !== "CLOSED" && pane.d.canMerge !== false
         enabled: pane.full
         text: "Merge"
         tooltipText: pane.inbox.mergeBlock !== "" ? pane.inbox.mergeBlock : "m"

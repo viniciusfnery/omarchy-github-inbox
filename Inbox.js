@@ -212,6 +212,9 @@ function cleanLine(line) {
     .replace(/(\*\*|__)(.+?)\1/g, "$2")
     .replace(/~~(.+?)~~/g, "$1")
     .replace(/(^|[^*\w])\*([^*\s][^*]*?)\*(?!\*)/g, "$1$2")
+    // A fixed set of entities, &amp; last so "&amp;lt;" stays "&lt;".
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
 }
 
 // The description as blocks for the pane: headings, paragraphs, list
@@ -224,12 +227,19 @@ function bodyBlocks(text, maxBlocks) {
   var lines = String(text || "").slice(0, 4000).replace(/\r/g, "").replace(/<!--[\s\S]*?-->/g, "").split("\n")
   var blocks = []
   var para = []
+  var paraQuote = false
+  var inList = false
   function block(heading, txt, bullet, indent) {
     blocks.push({ heading: heading, text: txt, bullet: bullet, indent: indent })
   }
+  // Quoted lines (release notes in a bot's PR, say) are blocks of their
+  // own, marked quote, so they never read as the author's words.
   function flush() {
     var t = para.join("\n").trim()
-    if (t !== "") block(false, t, "", 0)
+    if (t !== "") {
+      block(false, t, "", 0)
+      if (paraQuote) blocks[blocks.length - 1].quote = true
+    }
     para = []
   }
   for (var i = 0; i < lines.length && blocks.length < max; i++) {
@@ -246,6 +256,13 @@ function bodyBlocks(text, maxBlocks) {
     var h = /^#{1,6}\s+(.*)$/.exec(raw)
     if (h) { flush(); block(true, cleanLine(h[1]).trim(), "", 0); continue }
     var li = /^(\s*)([-*+]|\d+\.)\s+(.*)$/.exec(raw)
+    // An indented line right under a list item continues it (hard wrap).
+    if (!li && inList && /^\s+\S/.test(raw) && blocks.length > 0) {
+      var last = blocks[blocks.length - 1]
+      last.text = (last.text + " " + cleanLine(raw).trim()).trim()
+      continue
+    }
+    inList = !!li
     if (li) {
       flush()
       var indent = Math.min(4, Math.floor(li[1].length / 2))
@@ -254,9 +271,11 @@ function bodyBlocks(text, maxBlocks) {
       else block(false, cleanLine(li[3]).trim(), /\d/.test(li[2]) ? li[2] : "•", indent)
       continue
     }
+    var quoted = /^\s*>/.test(raw)
     var line = cleanLine(raw.replace(/^\s*>\s?/, ""))
-    if (line.trim() === "") flush()
-    else para.push(line)
+    if (line.trim() === "") { flush(); continue }
+    if (quoted !== paraQuote) { flush(); paraQuote = quoted }
+    para.push(line)
   }
   flush()
   return blocks.slice(0, max)
@@ -277,7 +296,8 @@ function checksText(c) {
   var counted = c.passed + c.failed + c.pending
   var partial = c.total > counted ? " (first " + counted + " of " + c.total + ")" : ""
   var passed = c.passed > 0 ? " · " + c.passed + " passed" : ""
-  if (c.failed > 0) return c.failed + " of " + c.total + " checks failing" + passed + partial
+  if (c.failed > 0) return c.failed + " of " + c.total + " checks failing"
+    + (c.pending > 0 ? " · " + c.pending + " running" : "") + passed + partial
   if (c.pending > 0) return c.pending + " of " + c.total + " checks running" + passed + partial
   if (c.state === "FAILURE" || c.state === "ERROR") return "Checks failing" + passed + partial
   if (c.state === "PENDING" || c.state === "EXPECTED") return "Checks running" + passed + partial

@@ -201,6 +201,21 @@ t("markdown cleanup is bounded: a huge hostile body stays fast", () => {
   assert.ok(Date.now() - t0 < 500, "took " + (Date.now() - t0) + " ms")
 })
 
+t("lists: a hard-wrapped item stays one item", () => {
+  const b = I.bodyBlocks("- first item\n  and continues here\n- second")
+  eq(b.map(x => x.bullet + "|" + x.text), ["•|first item and continues here", "•|second"])
+})
+t("checks: running checks are counted beside failing ones", () => {
+  assert.strictEqual(I.checksText({ passed: 20, failed: 2, pending: 4, total: 26, state: "FAILURE" }), "2 of 26 checks failing · 4 running · 20 passed")
+})
+t("entities: the common ones read as their characters, &amp; last", () => {
+  assert.strictEqual(I.cleanLine("&lt;T&gt; &quot;a&quot; it&#39;s&nbsp;x &amp;lt;"), "<T> \"a\" it's x &lt;")
+})
+t("quotes: quoted lines in a description are their own quote blocks", () => {
+  const b = I.bodyBlocks("Bumps lib.\n\n> Release notes\n> fixed a bug\n\nMine again")
+  eq(b.map(x => (x.quote ? "> " : "") + x.text), ["Bumps lib.", "> Release notes\nfixed a bug", "Mine again"])
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])

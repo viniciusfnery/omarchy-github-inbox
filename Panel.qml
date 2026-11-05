@@ -820,7 +820,11 @@ Panel {
     if (url !== previewUrl) return
     previewLoading = false
     // A failed refresh keeps the older preview on screen, marked as such.
-    if (!ok && previewData && previewData.url === url) { previewStale = true; return }
+    if (!ok && previewData && previewData.url === url) {
+      previewStale = true
+      previewError = String(parsed.error || "unreadable data")
+      return
+    }
     previewStale = false
     // GitHub computes mergeability lazily: ask again a few times.
     if (ok && parsed.kind === "pr" && parsed.mergeable === "UNKNOWN" && unknownRetries < 3) {
