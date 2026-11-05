@@ -190,3 +190,10 @@ function followDecision(st) {
   if (st.cursorUrl === "") return st.previewUrl === "" ? "none" : "clear"
   return st.cursorUrl === st.previewUrl ? "none" : "show"
 }
+
+// A finished action's result stays on screen until the user does
+// something deliberate that changes what the cursor means. A refresh
+// moving the cursor is not that.
+function releasesHold(cause) {
+  return ["key", "jump", "pointer", "search", "org"].indexOf(cause) >= 0
+}

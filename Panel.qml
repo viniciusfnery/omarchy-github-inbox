@@ -580,8 +580,8 @@ Panel {
   // Keys and real pointer motion call this before moving the cursor. A
   // cursor change without it (a refresh removed the merged PR, say) keeps
   // the finished action's item and notice on screen.
-  function releaseHold() {
-    if (!holdAfterAction) return
+  function releaseHold(cause) {
+    if (!holdAfterAction || !Inbox.releasesHold(cause)) return
     holdAfterAction = false
     // The cursor may not change (pointer motion within the row, Up on the
     // first row), so bring the pane to it explicitly.
@@ -1141,7 +1141,7 @@ Panel {
   }
 
   function moveCursor(delta) {
-    releaseHold()
+    releaseHold("key")
     if (rowCount === 0) return
     hoverGate.reset()
     cursorFromKeyboard = true
@@ -1161,7 +1161,7 @@ Panel {
   }
 
   function jumpSection(direction) {
-    releaseHold()
+    releaseHold("jump")
     var starts = sectionStarts()
     if (starts.length === 0) return
     hoverGate.reset()
@@ -1211,6 +1211,7 @@ Panel {
   }
 
   function openSearch() {
+    releaseHold("search")
     if (previewMode === "merge" && !actionBusy) previewMode = ""
     // Single-column: the search field lives in the list, so show the list.
     if (paneSolo && !actionBusy) closePreview()
@@ -1238,6 +1239,7 @@ Panel {
   }
 
   function selectOrg(index) {
+    releaseHold("org")
     var count = orgs.length + 1
     var wrapped = ((index % count) + count) % count
     selectedOrg = wrapped === 0 ? "" : orgs[wrapped - 1]
@@ -2748,7 +2750,7 @@ Panel {
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       onPositionChanged: function(mouse) {
         if (!hoverGate.moved(rowMouse, mouse)) return
-        root.releaseHold()
+        root.releaseHold("pointer")
         // Handing over from the keyboard: the row it opened stays open as
         // lingering, so the switch itself moves nothing.
         if (root.cursorFromKeyboard) root.lingerOpenRow()

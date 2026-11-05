@@ -161,6 +161,11 @@ t("follow: the pane follows the cursor, empties without a target, and waits whil
   assert.strictEqual(I.followDecision({ ...base, cursorUrl: "", previewUrl: "" }), "none")
 })
 
+t("hold: deliberate moves, searches and org switches release it, a refresh never does", () => {
+  for (const cause of ["key", "jump", "pointer", "search", "org"]) assert.strictEqual(I.releasesHold(cause), true, cause)
+  for (const cause of ["refresh", "settings", "", "anything else"]) assert.strictEqual(I.releasesHold(cause), false, cause)
+})
+
 t("dismissed: a dismissed thread stays hidden until it gets new activity", () => {
   const n = [{ threadId: "1", updatedAt: "t1" }, { threadId: "2", updatedAt: "t1" }]
   eq(I.undismissed(n, { "1": "t1" }).map(x => x.threadId), ["2"])
