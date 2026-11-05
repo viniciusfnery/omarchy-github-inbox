@@ -1833,22 +1833,31 @@ Panel {
         onActivated: root.scrollPreview(-1)
       }
 
-      PreviewPane {
-        id: previewPane
-        inbox: root
-        onLeft: root.paneOnLeft
-        // A fixed width on the outer edge, so it stays drawn while it fades
-        // and the panel grows or shrinks around it.
-        x: root.paneSolo ? 0 : (root.paneOnLeft ? 0 : root.listWidth + Style.space(12))
-        width: root.paneSolo ? parent.width : Style.space(440)
-        solo: root.paneSolo
+      // The room between the list and the card's outer edge. While the card
+      // grows or shrinks the pane is cut at the list's edge, never drawn on it.
+      Item {
+        x: root.paneSolo || root.paneOnLeft ? 0 : panelFlick.x + panelFlick.width + Style.space(12)
+        width: root.paneSolo ? parent.width
+          : Math.max(0, root.paneOnLeft ? panelFlick.x - Style.space(12) : parent.width - x)
         anchors.top: parent.top
         anchors.bottom: panelFlick.bottom
-        visible: opacity > 0.01
-        // Fading out after p: drawn, but nothing in it can be clicked.
-        enabled: root.previewOpen
-        opacity: root.previewOpen ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 160 } }
+        clip: true
+
+        PreviewPane {
+          id: previewPane
+          inbox: root
+          onLeft: root.paneOnLeft
+          // A fixed width on the outer edge, so it stays drawn while it fades
+          // and the panel grows or shrinks around it.
+          width: root.paneSolo ? parent.width : Style.space(440)
+          height: parent.height
+          solo: root.paneSolo
+          visible: opacity > 0.01
+          // Fading out after p: drawn, but nothing in it can be clicked.
+          enabled: root.previewOpen
+          opacity: root.previewOpen ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 160 } }
+        }
       }
 
       Text {
