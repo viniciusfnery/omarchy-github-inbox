@@ -4,7 +4,7 @@ Your GitHub inbox in the [Omarchy](https://omarchy.org) bar: one chip with
 your open workload count, one panel with everything on your plate. Every row
 is one click (or one keystroke) away from its page on GitHub.
 
-<img src="screenshot.png" width="380" alt="GitHub Inbox panel showing the six sections, with the selected notification's dismiss button and the key hints"> <img src="screenshot-settings.png" width="380" alt="GitHub Inbox settings: desktop notifications and focus mode switches, and an org tree with show/hide checkboxes and focus targets">
+<img src="assets/inbox.png" width="380" alt="GitHub Inbox panel showing the six sections, with the selected notification's dismiss button and the key hints"> <img src="assets/settings.png" width="380" alt="GitHub Inbox settings: desktop notifications and focus mode switches, and an org tree with show/hide checkboxes and focus targets">
 
 ## Sections
 
@@ -56,7 +56,7 @@ latest three comments, fetched on demand through `gh`. A preview seen in
 the last five minutes shows at once and is refreshed in the background
 when it is older than one.
 
-<img src="screenshot-preview.png" width="760" alt="GitHub Inbox preview of an approved PR beside the list: checks, review, merge status, labels, the description with its task list, comment cards, and the Open, Comment and Squash and merge buttons">
+<img src="assets/preview.png" width="760" alt="GitHub Inbox preview of an approved PR beside the list: checks, review, merge status, labels, the description with its task list, comment cards, and the Open, Comment and Squash and merge buttons">
 
 From the preview, `Enter` opens the page, `c` opens a comment box that posts
 with `Ctrl+Enter`, and `m` opens a merge confirmation that merges only on a
