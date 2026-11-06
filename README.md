@@ -56,6 +56,8 @@ latest three comments, fetched on demand through `gh`. A preview seen in
 the last five minutes shows at once and is refreshed in the background
 when it is older than one.
 
+<img src="screenshot-preview.png" width="760" alt="GitHub Inbox preview of an approved PR beside the list: checks, review, merge status, labels, the description with its task list, comment cards, and the Open, Comment and Squash and merge buttons">
+
 From the preview, `Enter` opens the page, `c` opens a comment box that posts
 with `Ctrl+Enter`, and `m` opens a merge confirmation that merges only on a
 fresh `Enter` or its Confirm button (never a held key or Space). The
